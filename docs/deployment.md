@@ -11,6 +11,8 @@
 
 ## 2. Docker Compose 部署
 
+### 2.1 服务器可以访问构建依赖
+
 ```bash
 git clone <你的仓库地址> codex-continuity
 cd codex-continuity
@@ -42,6 +44,47 @@ docker compose logs -f continuity
 ```bash
 curl http://127.0.0.1:8787/api/v1/health
 ```
+
+### 2.2 服务器没有海外网络
+
+推荐使用“联网构建、离线导入”，不要让个人服务器执行 `docker compose build`。
+
+在有 Docker 和正常构建网络的 Windows 电脑：
+
+```powershell
+.\scripts\export-image.ps1
+```
+
+或者从 GitHub Release 下载：
+
+```text
+codex-continuity-image-linux-amd64.tar.gz
+```
+
+把以下内容上传到个人服务器：
+
+```text
+docker-compose.yml
+.env
+release/
+codex-continuity-image-linux-amd64.tar.gz
+```
+
+服务器执行：
+
+```bash
+gzip -dc codex-continuity-image-linux-amd64.tar.gz | docker load
+docker image inspect codex-continuity:local
+docker compose up -d --no-build
+```
+
+更新时重复导入新镜像，再执行：
+
+```bash
+docker compose up -d --no-build --force-recreate
+```
+
+容器运行时只使用本机 SQLite、密文文件和静态网页，不访问海外网络。
 
 ## 3. HTTPS
 

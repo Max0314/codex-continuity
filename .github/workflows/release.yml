@@ -37,8 +37,16 @@ jobs:
         run: |
           CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o release/continuity-windows-amd64.exe ./cmd/continuity-client
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o release/continuity-server-linux-amd64 ./cmd/continuity-server
+
+      - name: Build offline Docker image
+        run: |
+          docker build --platform linux/amd64 -t codex-continuity:local .
+          docker save codex-continuity:local | gzip -9 > release/codex-continuity-image-linux-amd64.tar.gz
+
+      - name: Create checksums
+        run: |
           cd release
-          sha256sum continuity-windows-amd64.exe continuity-server-linux-amd64 continuity-web.tar.gz > SHA256SUMS.txt
+          sha256sum continuity-windows-amd64.exe continuity-server-linux-amd64 continuity-web.tar.gz codex-continuity-image-linux-amd64.tar.gz > SHA256SUMS.txt
 
       - uses: softprops/action-gh-release@v2
         with:
@@ -46,5 +54,6 @@ jobs:
             release/continuity-windows-amd64.exe
             release/continuity-server-linux-amd64
             release/continuity-web.tar.gz
+            release/codex-continuity-image-linux-amd64.tar.gz
             release/SHA256SUMS.txt
           generate_release_notes: true

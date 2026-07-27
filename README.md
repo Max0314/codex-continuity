@@ -25,6 +25,8 @@
 
 ## 快速启动服务端
 
+服务器可以联网拉取构建依赖时：
+
 ```powershell
 Copy-Item .env.example .env
 # 编辑 .env，至少替换 CONTINUITY_ADMIN_PASSWORD
@@ -32,6 +34,16 @@ docker compose up -d --build
 ```
 
 浏览器打开 `http://服务器地址:8787`。
+
+服务器没有海外网络时，不要在服务器构建。先在有网络的构建机或 GitHub Actions 生成
+`codex-continuity-image-linux-amd64.tar.gz`，上传后执行：
+
+```bash
+gzip -dc codex-continuity-image-linux-amd64.tar.gz | docker load
+docker compose up -d --no-build
+```
+
+此后服务运行不访问 Codex/OpenAI 或外部 CDN。
 
 ## 构建
 
@@ -46,6 +58,8 @@ Windows PowerShell：
 - `continuity-windows-amd64.exe`
 - `continuity-server-linux-amd64`
 - `SHA256SUMS.txt`
+
+有 Docker 的构建机还可以执行 `.\scripts\export-image.ps1`，生成供离线服务器导入的镜像包。
 
 ## 客户端基本流程
 
