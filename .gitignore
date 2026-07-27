@@ -1,0 +1,13 @@
+**/node_modules/
+web/dist/
+*.tsbuildinfo
+.vite/
+.env
+data/
+release/*
+!release/.gitkeep
+tools/
+*.log
+coverage/
+*.exe
+*.zip

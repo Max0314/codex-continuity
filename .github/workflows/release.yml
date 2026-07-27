@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.5"
+          cache: true
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Test and build web
+        run: |
+          go test ./...
+          cd web
+          npm ci
+          npm run build
+          cd ..
+          tar -czf release/continuity-web.tar.gz -C web/dist .
+
+      - name: Build binaries
+        run: |
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o release/continuity-windows-amd64.exe ./cmd/continuity-client
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o release/continuity-server-linux-amd64 ./cmd/continuity-server
+          cd release
+          sha256sum continuity-windows-amd64.exe continuity-server-linux-amd64 continuity-web.tar.gz > SHA256SUMS.txt
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/continuity-windows-amd64.exe
+            release/continuity-server-linux-amd64
+            release/continuity-web.tar.gz
+            release/SHA256SUMS.txt
+          generate_release_notes: true

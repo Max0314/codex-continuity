@@ -1,0 +1,33 @@
+services:
+  continuity:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: codex-continuity:local
+    container_name: codex-continuity
+    restart: unless-stopped
+    ports:
+      - "${CONTINUITY_PORT:-8787}:8080"
+    environment:
+      CONTINUITY_ADDR: ":8080"
+      CONTINUITY_DATA_DIR: "/data"
+      CONTINUITY_WEB_DIR: "/app/web"
+      CONTINUITY_DOWNLOAD_DIR: "/downloads"
+      CONTINUITY_PUBLIC_URL: "${CONTINUITY_PUBLIC_URL:-http://localhost:8787}"
+      CONTINUITY_ADMIN_EMAIL: "${CONTINUITY_ADMIN_EMAIL:-admin@example.com}"
+      CONTINUITY_ADMIN_NAME: "${CONTINUITY_ADMIN_NAME:-系统管理员}"
+      CONTINUITY_ADMIN_PASSWORD: "${CONTINUITY_ADMIN_PASSWORD:?请在 .env 设置管理员密码}"
+      CONTINUITY_COOKIE_SECURE: "${CONTINUITY_COOKIE_SECURE:-false}"
+      CONTINUITY_MAX_UPLOAD_MIB: "${CONTINUITY_MAX_UPLOAD_MIB:-512}"
+    volumes:
+      - continuity-data:/data
+      - ./release:/downloads:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  continuity-data:
