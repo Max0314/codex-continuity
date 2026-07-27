@@ -1,66 +1,38 @@
-# 官方能力边界
+# Codex 集成边界
 
-本文档记录设计依赖的 Codex 官方能力，以及本项目作出的工程推论。
+## 当前实现依赖
 
-## 已确认的官方能力
+Continuity 只读访问本机 Codex 数据目录：
 
-### Hooks
+- `~/.codex/sessions/`
+- `~/.codex/session_index.jsonl`
 
-Codex Hooks 支持：
+扫描器只提取与工作根目录相关的任务标识、标题、工作目录、更新时间和原始会话文件。读取失败、格式变化或单条记录无效时会跳过并继续，不写回这些文件。
 
-- `Stop`
-- `SessionStart`
-- `SessionEnd`
-- 其他工具和生命周期事件
+## 不依赖的能力
 
-Hook 可以将聊天发送到自定义日志系统，也可以用于持久记忆和校验。
+主同步链路不依赖：
 
-约束：
+- Codex Skill；
+- MCP；
+- Codex Plugin；
+- OpenAI/Codex 网络接口；
+- 服务端访问 OpenAI；
+- 修改 Codex 内部 SQLite 或任务数据库。
 
-- 当前实际执行的是 command handler；
-- 异步 command Hook 尚不支持；
-- `SessionEnd` 默认时间很短，最大支持时间也有限；
-- Hook 提供 `transcript_path`，但 transcript 格式不是稳定接口；
-- 非托管 Hook 首次或发生变化后需要审查和信任。
+因此个人服务器没有海外网络仍可运行。客户端只需要能够访问私有 Continuity 服务端。
 
-来源：[Codex Hooks](https://learn.chatgpt.com/docs/hooks)
+## 跨设备续接
 
-### Plugin
+当前不把“远端会话续接”描述为原生任务迁移：
 
-Codex Plugin 可以将 Skills、Hooks、MCP 配置、脚本和其他扩展能力作为一个安装单元交付。
+- 本机已经存在的任务可以返回原任务 ID 和工作目录；
+- 另一台电脑收到的是端到端加密的只读会话快照；
+- 客户端生成 `HANDOFF.md` 和建议提示词；
+- 用户在目标项目的新任务中继续。
 
-来源：[Build plugins](https://developers.openai.com/plugins/build/plugins)
+如果未来 Codex 提供稳定、公开、跨主机的任务导入接口，可以在不改变现有加密存储协议的前提下增加原生恢复适配层。
 
-### MCP
+## 工程风险
 
-Codex 本地客户端支持 stdio 和 Streamable HTTP MCP，并可以通过 MCP 使用结构化工具。
-
-来源：[Model Context Protocol](https://learn.chatgpt.com/docs/extend/mcp)
-
-### 本地状态
-
-Codex 将本地配置和状态存储在 `CODEX_HOME`，默认是 `~/.codex`。本地 memory 也属于具体 Codex host，不是跨主机全局状态。
-
-来源：[Configuration](https://learn.chatgpt.com/docs/config-file/config-basic)、[Memories](https://learn.chatgpt.com/docs/customization/memories)
-
-### 远程连接
-
-Codex 支持连接远程主机、继续远程主机上的对话，以及在符合条件的主机之间 Handoff。
-
-来源：[Remote connections](https://learn.chatgpt.com/docs/remote-connections)
-
-### App Server
-
-Codex app-server 提供认证、对话历史、审批和流式事件，适合深度客户端集成。远程 WebSocket 能力不应作为本项目 MVP 的核心依赖。
-
-来源：[Codex app-server](https://learn.chatgpt.com/docs/app-server)
-
-## 本项目的工程推论
-
-以下是基于官方能力作出的架构选择，不是 Codex 官方兼容承诺：
-
-- MCP 不能替代独立后台 Agent。
-- Hook 应只入队，不直接执行网络上传。
-- transcript 只作为 opaque 加密备份。
-- 跨电脑本地执行时，通过新对话 + 交接包恢复，而不是复制 thread。
-- 工作目录使用 project identity 和相对路径映射，不依赖绝对路径一致。
+`~/.codex` 下的本地文件属于实现细节，不应假设格式永久不变。发布新版本前需要用真实 Codex 数据执行兼容性回归；遇到未知字段时应保留原始密文快照并降级为结构化续接，而不是尝试修改 Codex 数据。

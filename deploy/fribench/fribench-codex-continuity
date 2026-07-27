@@ -1,0 +1,134 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+
+readonly public_bind_address='10.6.0.9'
+readonly public_interface='eth0'
+readonly public_port='24001'
+readonly public_duration='48h'
+readonly marker='managed-by-codex-continuity-temporary-public'
+readonly nginx_source='/usr/local/share/fribench/codex-continuity.nginx.conf'
+readonly nginx_available='/etc/nginx/sites-available/codex-continuity-temporary'
+readonly nginx_enabled='/etc/nginx/sites-enabled/codex-continuity-temporary'
+readonly timer_unit='codex-continuity-public-close'
+
+die() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+require_root() {
+  [ "$(id -u)" -eq 0 ] || die 'run through sudo as root'
+}
+
+ufw_rule_present() {
+  /usr/sbin/ufw status |
+    /usr/bin/awk -v port="${public_port}/tcp" -v tag="$marker" \
+      'index($0, port) && index($0, "ALLOW") && index($0, tag) { found = 1 }
+       END { exit(found ? 0 : 1) }'
+}
+
+check_backend() {
+  /usr/bin/ss -H -lnt |
+    /usr/bin/grep -Eq "127\\.0\\.0\\.1:${public_port}[[:space:]]" ||
+    die "expected backend listener is missing on 127.0.0.1:${public_port}"
+  /usr/bin/curl -fsS --max-time 8 \
+    "http://127.0.0.1:${public_port}/api/v1/health" >/dev/null ||
+    die 'backend health check failed'
+}
+
+install_nginx_site() {
+  [ -f "$nginx_source" ] || die "missing nginx template: ${nginx_source}"
+  /usr/bin/grep -Fq "$marker" "$nginx_source" ||
+    die 'nginx template is missing its management marker'
+
+  if [ -e "$nginx_available" ] &&
+     ! /usr/bin/grep -Fq "$marker" "$nginx_available"; then
+    die "refusing to replace unmanaged file: ${nginx_available}"
+  fi
+
+  /usr/bin/install -o root -g root -m 0644 "$nginx_source" "$nginx_available"
+  if [ ! -e "$nginx_enabled" ]; then
+    /usr/bin/ln -s "$nginx_available" "$nginx_enabled"
+  fi
+  /usr/sbin/nginx -t
+  /usr/bin/systemctl reload nginx
+}
+
+remove_nginx_site() {
+  /usr/bin/rm -f -- "$nginx_enabled" "$nginx_available"
+  /usr/sbin/nginx -t
+  /usr/bin/systemctl reload nginx
+}
+
+open_access() {
+  check_backend
+
+  if /usr/bin/ss -H -lnt |
+     /usr/bin/grep -Eq "${public_bind_address}:${public_port}[[:space:]]"; then
+    if [ ! -L "$nginx_enabled" ]; then
+      die "port ${public_port} already has an unmanaged public listener"
+    fi
+  fi
+
+  install_nginx_site
+
+  if ! ufw_rule_present; then
+    /usr/sbin/ufw allow in on "$public_interface" \
+      to "$public_bind_address" port "$public_port" proto tcp \
+      comment "$marker"
+  fi
+
+  /usr/bin/systemctl stop "${timer_unit}.timer" "${timer_unit}.service" \
+    >/dev/null 2>&1 || true
+  /usr/bin/systemctl reset-failed "${timer_unit}.timer" "${timer_unit}.service" \
+    >/dev/null 2>&1 || true
+  /usr/bin/systemd-run --quiet \
+    --unit="$timer_unit" \
+    --on-active="$public_duration" \
+    --timer-property=AccuracySec=1s \
+    /usr/local/sbin/fribench-codex-continuity close
+
+  echo "Codex Continuity public ingress is open for ${public_duration}."
+  show_status
+}
+
+close_access() {
+  if ufw_rule_present; then
+    /usr/sbin/ufw --force delete allow in on "$public_interface" \
+      to "$public_bind_address" port "$public_port" proto tcp
+  fi
+  remove_nginx_site
+  echo 'Codex Continuity public ingress is closed.'
+}
+
+show_status() {
+  echo "Current time: $(/usr/bin/date --iso-8601=seconds)"
+  echo "Public URL: http://1.14.72.50:${public_port}"
+  echo
+  echo 'Listeners:'
+  /usr/bin/ss -lnt |
+    /usr/bin/grep -E "State|127\\.0\\.0\\.1:${public_port}|${public_bind_address}:${public_port}" ||
+    true
+  echo
+  echo 'Firewall:'
+  /usr/sbin/ufw status |
+    /usr/bin/grep -E "Status:|${public_port}" ||
+    true
+  echo
+  echo 'Automatic close timer:'
+  /usr/bin/systemctl list-timers "${timer_unit}.timer" --all --no-pager || true
+}
+
+main() {
+  require_root
+  case "${1:-}" in
+    open) open_access ;;
+    close) close_access ;;
+    status) show_status ;;
+    *) die 'usage: fribench-codex-continuity {open|close|status}' ;;
+  esac
+}
+
+main "$@"

@@ -4,17 +4,19 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/neonet/codex-continuity/internal/client"
 	"github.com/neonet/codex-continuity/internal/model"
 )
 
-const version = "0.1.0"
+const version = "0.3.1"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -31,6 +33,12 @@ func main() {
 		err = scanCommand(os.Args[2:])
 	case "publish":
 		err = publishCommand(os.Args[2:])
+	case "flush":
+		err = flushCommand(os.Args[2:])
+	case "export":
+		err = exportCommand(os.Args[2:])
+	case "import":
+		err = importCommand(os.Args[2:])
 	case "list":
 		err = listCommand(os.Args[2:])
 	case "takeover":
@@ -120,7 +128,7 @@ func scanCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	manifest, err := client.Scan(cfg.Root, cfg.DeviceName)
+	manifest, err := client.ScanWithOptions(cfg.Root, cfg.DeviceName, cfg.EffectiveSyncScope())
 	if err != nil {
 		return err
 	}
@@ -133,6 +141,7 @@ func publishCommand(args []string) error {
 	flags := flag.NewFlagSet("publish", flag.ContinueOnError)
 	configPath := flags.String("config", "", "配置文件路径")
 	target := flags.String("target", "", "可选目标设备名")
+	queueDir := flags.String("queue-dir", "", "上传失败时保存加密快照的离线队列目录")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -140,40 +149,249 @@ func publishCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	fmt.Println("正在扫描工作区与相关 Codex 会话...")
-	manifest, err := client.Scan(cfg.Root, cfg.DeviceName)
+	build, encryptedPath, cleanup, err := buildEncryptedSnapshot(cfg)
 	if err != nil {
 		return err
 	}
-	tempDir, err := os.MkdirTemp("", "codex-continuity-publish-*")
-	if err != nil {
-		return err
-	}
-	defer os.RemoveAll(tempDir)
-	zipPath := filepath.Join(tempDir, "handoff.zip")
-	build, err := client.BuildBundle(manifest, zipPath)
-	if err != nil {
-		return err
-	}
-	key, _ := cfg.KeyBytes()
-	encryptedPath := filepath.Join(tempDir, "handoff.ccx")
-	if err := client.EncryptFile(build.ZipPath, encryptedPath, key); err != nil {
-		return err
-	}
-	projectName := fmt.Sprintf("%s 工作区（%d 个项目）", build.Manifest.RootName, len(build.Manifest.Projects))
-	handoff, err := client.NewAPI(cfg).UploadHandoff(client.UploadMetadata{
-		ProjectName:      projectName,
+	defer cleanup()
+	metadata := client.UploadMetadata{
+		ProjectName:      fmt.Sprintf("%s 工作区（%d 个项目）", build.Manifest.RootName, len(build.Manifest.Projects)),
 		WorkspaceKey:     build.Manifest.WorkspaceKey,
 		SourceDeviceID:   cfg.DeviceID,
 		TargetDeviceName: *target,
 		Manifest:         build.Manifest,
-	}, encryptedPath)
+	}
+	handoff, err := client.NewAPI(cfg).UploadHandoff(metadata, encryptedPath)
+	if err != nil {
+		if strings.TrimSpace(*queueDir) == "" {
+			return err
+		}
+		queuedPath, queueErr := queueSnapshot(*queueDir, metadata, encryptedPath)
+		if queueErr != nil {
+			return fmt.Errorf("上传失败（%v），且保存离线队列失败：%w", err, queueErr)
+		}
+		fmt.Printf("网络暂不可用；加密快照已保存到离线队列：%s\n", queuedPath)
+		return nil
+	}
+	info, _ := os.Stat(encryptedPath)
+	fmt.Printf("同步完成：%s\n项目：%d，会话：%d，包大小：%s\n",
+		handoff.ID, len(build.Manifest.Projects), len(build.Manifest.Sessions), humanBytes(info.Size()))
+	return nil
+}
+
+type queuedSnapshot struct {
+	CreatedAt time.Time             `json:"createdAt"`
+	Metadata  client.UploadMetadata `json:"metadata"`
+}
+
+func buildEncryptedSnapshot(cfg client.Config) (client.BuildResult, string, func(), error) {
+	fmt.Println("正在扫描工作区与相关 Codex 会话...")
+	scope := cfg.EffectiveSyncScope()
+	manifest, err := client.ScanWithOptions(cfg.Root, cfg.DeviceName, scope)
+	if err != nil {
+		return client.BuildResult{}, "", func() {}, err
+	}
+	tempDir, err := os.MkdirTemp("", "codex-continuity-snapshot-*")
+	if err != nil {
+		return client.BuildResult{}, "", func() {}, err
+	}
+	cleanup := func() { _ = os.RemoveAll(tempDir) }
+	zipPath := filepath.Join(tempDir, "snapshot.zip")
+	build, err := client.BuildBundle(manifest, zipPath)
+	if err != nil {
+		cleanup()
+		return client.BuildResult{}, "", func() {}, err
+	}
+	key, err := cfg.KeyBytes()
+	if err != nil {
+		cleanup()
+		return client.BuildResult{}, "", func() {}, err
+	}
+	encryptedPath := filepath.Join(tempDir, "snapshot.ccx")
+	if err := client.EncryptFile(build.ZipPath, encryptedPath, key); err != nil {
+		cleanup()
+		return client.BuildResult{}, "", func() {}, err
+	}
+	info, err := os.Stat(encryptedPath)
+	if err != nil {
+		cleanup()
+		return client.BuildResult{}, "", func() {}, err
+	}
+	maxBytes := int64(scope.MaxBundleMiB) * 1024 * 1024
+	if info.Size() > maxBytes {
+		cleanup()
+		return client.BuildResult{}, "", func() {}, fmt.Errorf(
+			"加密同步包为 %s，超过 %d MiB 上限；请缩短时间范围或减少同步项目",
+			humanBytes(info.Size()),
+			scope.MaxBundleMiB,
+		)
+	}
+	return build, encryptedPath, cleanup, nil
+}
+
+func queueSnapshot(queueDir string, metadata client.UploadMetadata, encryptedPath string) (string, error) {
+	if err := os.MkdirAll(queueDir, 0o700); err != nil {
+		return "", err
+	}
+	name := fmt.Sprintf("%d", time.Now().UTC().UnixNano())
+	blobPath := filepath.Join(queueDir, name+".ccx")
+	metaPath := filepath.Join(queueDir, name+".json")
+	if err := copyFileExclusive(encryptedPath, blobPath); err != nil {
+		return "", err
+	}
+	raw, err := json.MarshalIndent(queuedSnapshot{CreatedAt: time.Now().UTC(), Metadata: metadata}, "", "  ")
+	if err != nil {
+		_ = os.Remove(blobPath)
+		return "", err
+	}
+	if err := os.WriteFile(metaPath, raw, 0o600); err != nil {
+		_ = os.Remove(blobPath)
+		return "", err
+	}
+	return blobPath, nil
+}
+
+func flushCommand(args []string) error {
+	flags := flag.NewFlagSet("flush", flag.ContinueOnError)
+	configPath := flags.String("config", "", "配置文件路径")
+	queueDir := flags.String("queue-dir", "", "离线队列目录")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*queueDir) == "" {
+		return fmt.Errorf("必须提供 --queue-dir")
+	}
+	cfg, err := client.LoadConfig(*configPath)
 	if err != nil {
 		return err
 	}
-	info, _ := os.Stat(encryptedPath)
-	fmt.Printf("发布完成：%s\n项目：%d，会话：%d，包大小：%s\n",
-		handoff.ID, len(build.Manifest.Projects), len(build.Manifest.Sessions), humanBytes(info.Size()))
+	entries, err := filepath.Glob(filepath.Join(*queueDir, "*.json"))
+	if err != nil {
+		return err
+	}
+	sort.Strings(entries)
+	if len(entries) == 0 {
+		fmt.Println("离线队列为空")
+		return nil
+	}
+	api := client.NewAPI(cfg)
+	for _, metaPath := range entries {
+		raw, err := os.ReadFile(metaPath)
+		if err != nil {
+			return err
+		}
+		var queued queuedSnapshot
+		if err := json.Unmarshal(raw, &queued); err != nil {
+			return fmt.Errorf("离线队列元数据无效 %s：%w", metaPath, err)
+		}
+		blobPath := strings.TrimSuffix(metaPath, filepath.Ext(metaPath)) + ".ccx"
+		if _, err := os.Stat(blobPath); err != nil {
+			return fmt.Errorf("离线队列缺少加密快照 %s", blobPath)
+		}
+		handoff, err := api.UploadHandoff(queued.Metadata, blobPath)
+		if err != nil {
+			return fmt.Errorf("重试上传 %s 失败：%w", filepath.Base(blobPath), err)
+		}
+		if err := os.Remove(blobPath); err != nil {
+			return err
+		}
+		if err := os.Remove(metaPath); err != nil {
+			return err
+		}
+		fmt.Printf("离线快照已上传：%s\n", handoff.ID)
+	}
+	return nil
+}
+
+func exportCommand(args []string) error {
+	flags := flag.NewFlagSet("export", flag.ContinueOnError)
+	configPath := flags.String("config", "", "配置文件路径")
+	output := flags.String("output", "", "导出的 .ccx 文件路径")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*output) == "" {
+		return fmt.Errorf("必须提供 --output")
+	}
+	cfg, err := client.LoadConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	build, encryptedPath, cleanup, err := buildEncryptedSnapshot(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	if err := copyFileExclusive(encryptedPath, *output); err != nil {
+		return err
+	}
+	info, _ := os.Stat(*output)
+	fmt.Printf("加密归档已导出：%s\n项目：%d，会话：%d，包大小：%s\n",
+		*output, len(build.Manifest.Projects), len(build.Manifest.Sessions), humanBytes(info.Size()))
+	return nil
+}
+
+func importCommand(args []string) error {
+	flags := flag.NewFlagSet("import", flag.ContinueOnError)
+	configPath := flags.String("config", "", "配置文件路径")
+	input := flags.String("input", "", "要导入的 .ccx 文件")
+	output := flags.String("output", "", "只读续接目录")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*input) == "" || strings.TrimSpace(*output) == "" {
+		return fmt.Errorf("必须提供 --input 和 --output")
+	}
+	cfg, err := client.LoadConfig(*configPath)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(*output); err == nil {
+		return fmt.Errorf("目标目录已存在：%s", *output)
+	}
+	tempDir, err := os.MkdirTemp("", "codex-continuity-import-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tempDir)
+	key, err := cfg.KeyBytes()
+	if err != nil {
+		return err
+	}
+	zipPath := filepath.Join(tempDir, "archive.zip")
+	if err := client.DecryptFile(*input, zipPath, key); err != nil {
+		return err
+	}
+	if err := client.ExtractBundle(zipPath, *output); err != nil {
+		return err
+	}
+	fmt.Printf("归档已导入：%s\n", filepath.Join(*output, "HANDOFF.md"))
+	return nil
+}
+
+func copyFileExclusive(source, destination string) error {
+	if err := os.MkdirAll(filepath.Dir(destination), 0o700); err != nil {
+		return err
+	}
+	src, err := os.Open(source)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(dst, src)
+	closeErr := dst.Close()
+	if copyErr != nil {
+		_ = os.Remove(destination)
+		return copyErr
+	}
+	if closeErr != nil {
+		_ = os.Remove(destination)
+		return closeErr
+	}
 	return nil
 }
 
@@ -186,6 +404,13 @@ func listCommand(args []string) error {
 	if err != nil {
 		return err
 	}
+	pending := handoffs[:0]
+	for _, handoff := range handoffs {
+		if handoff.Status == model.HandoffPending {
+			pending = append(pending, handoff)
+		}
+	}
+	handoffs = pending
 	if len(handoffs) == 0 {
 		fmt.Println("当前没有可接管的交接包。")
 		return nil
@@ -215,11 +440,8 @@ func takeoverCommand(args []string) error {
 	if err != nil {
 		return err
 	}
-	if len(handoffs) == 0 {
-		return fmt.Errorf("没有可接管的交接包")
-	}
 	sort.Slice(handoffs, func(i, j int) bool { return handoffs[i].CreatedAt.After(handoffs[j].CreatedAt) })
-	selected := handoffs[0]
+	var selected model.Handoff
 	if *id != "" {
 		found := false
 		for _, handoff := range handoffs {
@@ -231,6 +453,16 @@ func takeoverCommand(args []string) error {
 		}
 		if !found {
 			return fmt.Errorf("找不到交接 ID %s", *id)
+		}
+	} else {
+		for _, handoff := range handoffs {
+			if handoff.Status == model.HandoffPending {
+				selected = handoff
+				break
+			}
+		}
+		if selected.ID == "" {
+			return fmt.Errorf("没有可接管的交接包")
 		}
 	}
 	tempDir, err := os.MkdirTemp("", "codex-continuity-takeover-*")
@@ -251,7 +483,13 @@ func takeoverCommand(args []string) error {
 		*output = filepath.Join(cfg.Root, ".codex-continuity", "handoffs", selected.ID)
 	}
 	if _, err := os.Stat(*output); err == nil {
-		return fmt.Errorf("目标目录已存在：%s", *output)
+		handoffPath := filepath.Join(*output, "HANDOFF.md")
+		if _, handoffErr := os.Stat(handoffPath); handoffErr == nil {
+			_ = api.ClaimHandoff(selected.ID, cfg.DeviceName)
+			fmt.Printf("该快照已在本机：%s\n", handoffPath)
+			return nil
+		}
+		return fmt.Errorf("目标目录已存在但不是完整快照：%s", *output)
 	}
 	if err := client.ExtractBundle(zipPath, *output); err != nil {
 		return err

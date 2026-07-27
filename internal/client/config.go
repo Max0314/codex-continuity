@@ -12,12 +12,43 @@ import (
 )
 
 type Config struct {
-	ServerURL     string `json:"serverUrl"`
-	Token         string `json:"token"`
-	Root          string `json:"root"`
-	DeviceName    string `json:"deviceName"`
-	DeviceID      string `json:"deviceId,omitempty"`
-	EncryptionKey string `json:"encryptionKey"`
+	ServerURL     string    `json:"serverUrl"`
+	Token         string    `json:"token"`
+	Root          string    `json:"root"`
+	DeviceName    string    `json:"deviceName"`
+	DeviceID      string    `json:"deviceId,omitempty"`
+	EncryptionKey string    `json:"encryptionKey"`
+	SyncScope     SyncScope `json:"syncScope,omitempty"`
+}
+
+const (
+	DefaultSyncDays     = 7
+	MaxAllowedBundleMiB = 500
+)
+
+type SyncScope struct {
+	Days            int      `json:"days"`
+	ProjectPaths    []string `json:"projectPaths,omitempty"`
+	IncludeArchived bool     `json:"includeArchived"`
+	MaxBundleMiB    int      `json:"maxBundleMiB"`
+}
+
+func DefaultSyncScope() SyncScope {
+	return SyncScope{
+		Days:         DefaultSyncDays,
+		MaxBundleMiB: MaxAllowedBundleMiB,
+	}
+}
+
+func (c Config) EffectiveSyncScope() SyncScope {
+	scope := c.SyncScope
+	if scope.Days == 0 && scope.MaxBundleMiB == 0 && len(scope.ProjectPaths) == 0 && !scope.IncludeArchived {
+		return DefaultSyncScope()
+	}
+	if scope.MaxBundleMiB == 0 {
+		scope.MaxBundleMiB = MaxAllowedBundleMiB
+	}
+	return scope
 }
 
 func DefaultConfigPath() (string, error) {
@@ -80,6 +111,19 @@ func (c Config) Validate() error {
 	}
 	if _, err := c.KeyBytes(); err != nil {
 		return err
+	}
+	scope := c.EffectiveSyncScope()
+	if scope.Days != 0 && scope.Days != 2 && scope.Days != 5 && scope.Days != 7 {
+		return fmt.Errorf("同步时间范围只能是 2 天、5 天、7 天或不限制")
+	}
+	if scope.MaxBundleMiB < 1 || scope.MaxBundleMiB > MaxAllowedBundleMiB {
+		return fmt.Errorf("单个加密同步包上限必须在 1 到 %d MiB 之间", MaxAllowedBundleMiB)
+	}
+	for _, projectPath := range scope.ProjectPaths {
+		path := filepath.Clean(strings.TrimSpace(projectPath))
+		if path == "" || filepath.IsAbs(path) || path == ".." || strings.HasPrefix(path, ".."+string(os.PathSeparator)) {
+			return fmt.Errorf("同步项目路径无效: %s", projectPath)
+		}
 	}
 	return nil
 }

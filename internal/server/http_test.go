@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -17,8 +18,12 @@ import (
 )
 
 func TestLoginAndClientHandoffFlow(t *testing.T) {
-	t.Parallel()
 	dataDir := t.TempDir()
+	// A missing temp directory proves large multipart uploads do not depend on
+	// ParseMultipartForm spilling the blob to the operating-system temp path.
+	missingTempDir := filepath.Join(dataDir, "missing-temp")
+	t.Setenv("TMP", missingTempDir)
+	t.Setenv("TEMP", missingTempDir)
 	cfg := Config{
 		Address:        ":0",
 		DataDir:        dataDir,
@@ -27,7 +32,7 @@ func TestLoginAndClientHandoffFlow(t *testing.T) {
 		AdminPassword:  "a-strong-test-password",
 		AdminName:      "测试管理员",
 		SessionTTL:     24 * 60 * 60 * 1e9,
-		MaxUploadBytes: 16 << 20,
+		MaxUploadBytes: 20 << 20,
 		DownloadDir:    filepath.Join(dataDir, "downloads"),
 	}
 	store, err := OpenStore(cfg)
@@ -67,6 +72,30 @@ func TestLoginAndClientHandoffFlow(t *testing.T) {
 	}
 	if !strings.HasPrefix(tokenPayload.Secret, "ct_") {
 		t.Fatalf("unexpected API token: %q", tokenPayload.Secret)
+	}
+
+	diagnosticRequest, _ := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/api/v1/client/diagnostics/upload-test",
+		bytes.NewReader(bytes.Repeat([]byte{0x42}, 64*1024)),
+	)
+	diagnosticRequest.Header.Set("Authorization", "Bearer "+tokenPayload.Secret)
+	diagnosticRequest.Header.Set("Content-Type", "application/octet-stream")
+	diagnosticResponse, err := http.DefaultClient.Do(diagnosticRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer diagnosticResponse.Body.Close()
+	var diagnosticPayload struct {
+		ReceivedBytes int    `json:"receivedBytes"`
+		SHA256        string `json:"sha256"`
+		Discarded     bool   `json:"discarded"`
+	}
+	if err := json.NewDecoder(diagnosticResponse.Body).Decode(&diagnosticPayload); err != nil {
+		t.Fatal(err)
+	}
+	if diagnosticResponse.StatusCode != http.StatusOK || diagnosticPayload.ReceivedBytes != 64*1024 || !diagnosticPayload.Discarded || len(diagnosticPayload.SHA256) != 64 {
+		t.Fatalf("unexpected upload test response: status=%d payload=%#v", diagnosticResponse.StatusCode, diagnosticPayload)
 	}
 
 	deviceRequest := bearerJSONRequest(t, http.MethodPost, server.URL+"/api/v1/client/devices", `{
@@ -127,9 +156,24 @@ func TestLoginAndClientHandoffFlow(t *testing.T) {
 	if claimResponse.StatusCode != http.StatusNoContent {
 		t.Fatalf("claim status = %d", claimResponse.StatusCode)
 	}
+
+	largeHandoffID := uploadSizedTestHandoff(
+		t,
+		server.URL,
+		tokenPayload.Secret,
+		devicePayload.Device.ID,
+		17<<20,
+	)
+	if largeHandoffID == "" {
+		t.Fatal("17 MiB streaming handoff was not created")
+	}
 }
 
 func uploadTestHandoff(t *testing.T, baseURL, token, deviceID string) string {
+	return uploadSizedTestHandoff(t, baseURL, token, deviceID, len("encrypted-test-payload"))
+}
+
+func uploadSizedTestHandoff(t *testing.T, baseURL, token, deviceID string, payloadSize int) string {
 	t.Helper()
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
@@ -148,7 +192,8 @@ func uploadTestHandoff(t *testing.T, baseURL, token, deviceID string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := part.Write([]byte("encrypted-test-payload")); err != nil {
+	uploadPayload := bytes.Repeat([]byte("encrypted-test-payload"), payloadSize/len("encrypted-test-payload")+1)
+	if _, err := part.Write(uploadPayload[:payloadSize]); err != nil {
 		t.Fatal(err)
 	}
 	writer.Close()
@@ -197,4 +242,19 @@ func bearerJSONRequest(t *testing.T, method, url, body, token string) *http.Requ
 
 func TestMain(m *testing.M) {
 	os.Exit(m.Run())
+}
+
+func TestSaveUploadEnforcesBlobLimitAndRemovesPartialFile(t *testing.T) {
+	t.Parallel()
+	destination := filepath.Join(t.TempDir(), "oversized.ccx")
+	size, err := saveUpload(bytes.NewReader(bytes.Repeat([]byte{0x42}, 1025)), destination, 1024)
+	if !errors.Is(err, errUploadTooLarge) {
+		t.Fatalf("saveUpload error = %v, want errUploadTooLarge", err)
+	}
+	if size != 0 {
+		t.Fatalf("saveUpload size = %d, want 0", size)
+	}
+	if _, statErr := os.Stat(destination); !os.IsNotExist(statErr) {
+		t.Fatalf("partial upload was not removed: %v", statErr)
+	}
 }

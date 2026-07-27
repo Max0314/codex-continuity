@@ -28,7 +28,7 @@ CONTINUITY_ADMIN_EMAIL=admin@example.com
 CONTINUITY_ADMIN_NAME=系统管理员
 CONTINUITY_ADMIN_PASSWORD=一段足够长的随机密码
 CONTINUITY_COOKIE_SECURE=true
-CONTINUITY_MAX_UPLOAD_MIB=512
+CONTINUITY_MAX_UPLOAD_MIB=500
 ```
 
 启动：
@@ -114,15 +114,24 @@ docker compose up -d --no-build --force-recreate
 
 ## 5. 客户端下载
 
-在 Windows 构建机执行：
+在 Windows 构建机执行桌面构建：
 
 ```powershell
-.\scripts\build.ps1
+.\scripts\build-desktop.ps1
 ```
 
-将 `release/continuity-windows-amd64.exe`、`release/SHA256SUMS.txt` 放在服务器仓库的 `release/` 目录，再重启 Compose。管理网页“客户端下载”会从 `/downloads/` 提供文件。
+将下列文件放在服务器仓库的 `release/` 目录，再重启 Compose：
 
-正式推广给同事前，应增加代码签名证书和稳定更新通道。
+```text
+codex-continuity_0.3.1_x64-setup.exe
+codex-continuity_0.3.1_x64_zh-CN.msi
+codex-continuity_0.3.1_windows-x64-portable.zip
+SHA256SUMS.txt
+```
+
+管理网页“桌面客户端”会从 `/downloads/` 提供安装包。GitHub Release 工作流会自动构建这些 Windows 产物和 Linux 服务端离线镜像。
+
+正式推广给同事前，必须配置组织代码签名证书和稳定更新通道。
 
 ## 6. 备份
 

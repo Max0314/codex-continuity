@@ -18,7 +18,7 @@ services:
       CONTINUITY_ADMIN_NAME: "${CONTINUITY_ADMIN_NAME:-系统管理员}"
       CONTINUITY_ADMIN_PASSWORD: "${CONTINUITY_ADMIN_PASSWORD:?请在 .env 设置管理员密码}"
       CONTINUITY_COOKIE_SECURE: "${CONTINUITY_COOKIE_SECURE:-false}"
-      CONTINUITY_MAX_UPLOAD_MIB: "${CONTINUITY_MAX_UPLOAD_MIB:-512}"
+      CONTINUITY_MAX_UPLOAD_MIB: "${CONTINUITY_MAX_UPLOAD_MIB:-500}"
     volumes:
       - continuity-data:/data
       - ./release:/downloads:ro

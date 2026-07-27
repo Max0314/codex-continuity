@@ -22,7 +22,7 @@ import (
 
 const (
 	maxSessionFileSize = 128 * 1024 * 1024
-	maxSessionTotal    = 350 * 1024 * 1024
+	maxSessionTotal    = 450 * 1024 * 1024
 	maxPatchSize       = 4 * 1024 * 1024
 )
 
@@ -55,6 +55,7 @@ type SessionState struct {
 	ThreadName   string    `json:"threadName,omitempty"`
 	RelativeCWD  string    `json:"relativeCwd"`
 	ModifiedAt   time.Time `json:"modifiedAt"`
+	Archived     bool      `json:"archived"`
 	ArchivePath  string    `json:"archivePath,omitempty"`
 	Size         int64     `json:"size"`
 	Included     bool      `json:"included"`
@@ -68,15 +69,19 @@ type BuildResult struct {
 }
 
 func Scan(root, deviceName string) (Manifest, error) {
+	return ScanWithOptions(root, deviceName, DefaultSyncScope())
+}
+
+func ScanWithOptions(root, deviceName string, scope SyncScope) (Manifest, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return Manifest{}, err
 	}
-	projects, err := scanProjects(absRoot)
+	projects, err := scanProjects(absRoot, scope.ProjectPaths)
 	if err != nil {
 		return Manifest{}, err
 	}
-	sessions, notes := scanSessions(absRoot)
+	sessions, notes := scanSessions(absRoot, scope)
 	return Manifest{
 		SchemaVersion: 1,
 		CreatedAt:     time.Now().UTC(),
@@ -132,7 +137,7 @@ func BuildBundle(manifest Manifest, destination string) (BuildResult, error) {
 			continue
 		}
 		if includedBytes+session.Size > maxSessionTotal {
-			session.SkippedCause = "会话总量超过 350 MiB"
+			session.SkippedCause = "会话原始数据总量超过 450 MiB"
 			continue
 		}
 		entryName := "sessions/" + safeArchiveName(session.ID) + ".jsonl"
@@ -216,7 +221,8 @@ func ExtractBundle(source, destination string) error {
 	return nil
 }
 
-func scanProjects(root string) ([]ProjectState, error) {
+func scanProjects(root string, selectedPaths []string) ([]ProjectState, error) {
+	selected := normalizedProjectSet(selectedPaths)
 	projectDirs := []string{}
 	rootDepth := pathDepth(root)
 	skipNames := map[string]bool{
@@ -238,7 +244,10 @@ func scanProjects(root string) ([]ProjectState, error) {
 		}
 		if path != root {
 			if _, err := os.Stat(filepath.Join(path, ".git")); err == nil {
-				projectDirs = append(projectDirs, path)
+				relative, _ := filepath.Rel(root, path)
+				if projectPathSelected(filepath.ToSlash(relative), selected) {
+					projectDirs = append(projectDirs, path)
+				}
 				return filepath.SkipDir
 			}
 		}
@@ -281,7 +290,7 @@ func scanProjects(root string) ([]ProjectState, error) {
 	return projects, nil
 }
 
-func scanSessions(root string) ([]SessionState, []string) {
+func scanSessions(root string, scope SyncScope) ([]SessionState, []string) {
 	configDir, err := os.UserConfigDir()
 	if err != nil {
 		return nil, []string{"无法定位 Codex 配置目录"}
@@ -291,41 +300,105 @@ func scanSessions(root string) ([]SessionState, []string) {
 	if home, homeErr := os.UserHomeDir(); homeErr == nil {
 		codexRoot = filepath.Join(home, ".codex")
 	}
-	sessionRoot := filepath.Join(codexRoot, "sessions")
 	threadNames := readThreadNames(filepath.Join(codexRoot, "session_index.jsonl"))
-	sessions := []SessionState{}
-	_ = filepath.WalkDir(sessionRoot, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil || entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
-			return nil
-		}
-		meta, err := readSessionMeta(path)
-		if err != nil || meta.CWD == "" || !isUnderRoot(meta.CWD, root) {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return nil
-		}
-		relativeCWD, _ := filepath.Rel(root, meta.CWD)
-		sessions = append(sessions, SessionState{
-			ID:          meta.ID,
-			ThreadName:  threadNames[meta.ID],
-			RelativeCWD: filepath.ToSlash(relativeCWD),
-			ModifiedAt:  info.ModTime().UTC(),
-			Size:        info.Size(),
-			sourcePath:  path,
-		})
-		return nil
-	})
-	sort.Slice(sessions, func(i, j int) bool { return sessions[i].ModifiedAt.After(sessions[j].ModifiedAt) })
-	if len(sessions) > 30 {
-		sessions = sessions[:30]
+	selected := normalizedProjectSet(scope.ProjectPaths)
+	var cutoff time.Time
+	if scope.Days > 0 {
+		cutoff = time.Now().Add(-time.Duration(scope.Days) * 24 * time.Hour)
 	}
+	byID := map[string]SessionState{}
+	scanRoot := func(sessionRoot string, archived bool) {
+		_ = filepath.WalkDir(sessionRoot, func(path string, entry fs.DirEntry, walkErr error) error {
+			if walkErr != nil || entry.IsDir() || !strings.HasSuffix(strings.ToLower(entry.Name()), ".jsonl") {
+				return nil
+			}
+			meta, err := readSessionMeta(path)
+			if err != nil || meta.ID == "" || meta.CWD == "" || !isUnderRoot(meta.CWD, root) {
+				return nil
+			}
+			if existing, exists := byID[meta.ID]; exists && !existing.Archived {
+				return nil
+			}
+			info, err := entry.Info()
+			if err != nil || (!cutoff.IsZero() && info.ModTime().Before(cutoff)) {
+				return nil
+			}
+			relativeCWD, _ := filepath.Rel(root, meta.CWD)
+			relativePath := filepath.ToSlash(relativeCWD)
+			if !sessionProjectSelected(relativePath, selected) {
+				return nil
+			}
+			byID[meta.ID] = SessionState{
+				ID:          meta.ID,
+				ThreadName:  threadNames[meta.ID],
+				RelativeCWD: relativePath,
+				ModifiedAt:  info.ModTime().UTC(),
+				Archived:    archived,
+				Size:        info.Size(),
+				sourcePath:  path,
+			}
+			return nil
+		})
+	}
+	scanRoot(filepath.Join(codexRoot, "sessions"), false)
+	if scope.IncludeArchived {
+		scanRoot(filepath.Join(codexRoot, "archived_sessions"), true)
+	}
+	sessions := make([]SessionState, 0, len(byID))
+	for _, session := range byID {
+		sessions = append(sessions, session)
+	}
+	sort.Slice(sessions, func(i, j int) bool { return sessions[i].ModifiedAt.After(sessions[j].ModifiedAt) })
 	notes := []string{
 		"Codex 会话格式属于内部实现；交接包保存原始只读快照，不会直接覆盖目标电脑的 Codex 数据库。",
 		"发布后继续产生的新消息不在本快照内；再次执行 publish 可生成新的交接。",
 	}
 	return sessions, notes
+}
+
+func normalizedProjectSet(paths []string) map[string]bool {
+	if len(paths) == 0 {
+		return nil
+	}
+	result := make(map[string]bool, len(paths))
+	for _, path := range paths {
+		normalized := strings.Trim(strings.ToLower(filepath.ToSlash(filepath.Clean(strings.TrimSpace(path)))), "/")
+		if normalized == "" {
+			normalized = "."
+		}
+		result[normalized] = true
+	}
+	return result
+}
+
+func projectPathSelected(relativePath string, selected map[string]bool) bool {
+	if len(selected) == 0 {
+		return true
+	}
+	normalized := strings.Trim(strings.ToLower(filepath.ToSlash(filepath.Clean(relativePath))), "/")
+	if normalized == "" {
+		normalized = "."
+	}
+	return selected[normalized]
+}
+
+func sessionProjectSelected(relativeCWD string, selected map[string]bool) bool {
+	if len(selected) == 0 {
+		return true
+	}
+	normalized := strings.Trim(strings.ToLower(filepath.ToSlash(filepath.Clean(relativeCWD))), "/")
+	if normalized == "" {
+		normalized = "."
+	}
+	if selected["."] && normalized == "." {
+		return true
+	}
+	for projectPath := range selected {
+		if projectPath != "." && (normalized == projectPath || strings.HasPrefix(normalized, projectPath+"/")) {
+			return true
+		}
+	}
+	return false
 }
 
 type sessionMeta struct {
@@ -471,7 +544,7 @@ func (b *cappedBuffer) String() string {
 
 func renderHandoffMarkdown(manifest Manifest) string {
 	var builder strings.Builder
-	builder.WriteString("# Codex 工作接力\n\n")
+	builder.WriteString("# Codex Continuity 会话续接\n\n")
 	builder.WriteString("这是一份只读交接快照。请先核对 Git 分支与提交，再让 Codex 读取本文件、`manifest.json`、相关补丁和需要的会话记录。\n\n")
 	builder.WriteString(fmt.Sprintf("- 发布时间：%s\n", manifest.CreatedAt.Local().Format("2006-01-02 15:04:05")))
 	builder.WriteString(fmt.Sprintf("- 来源设备：%s\n", manifest.DeviceName))
@@ -492,7 +565,7 @@ func renderHandoffMarkdown(manifest Manifest) string {
 		builder.WriteString(fmt.Sprintf("| %s | `%s` | `%s` | `%s` | %s |\n",
 			project.Name, project.RelativePath, project.Branch, commit, state))
 	}
-	builder.WriteString("\n## 建议接管提示词\n\n")
+	builder.WriteString("\n## 建议续接提示词\n\n")
 	builder.WriteString("> 请读取当前 HANDOFF.md 和 manifest.json，核对目标项目 Git 状态。需要时查看 projects 下的补丁和 sessions 下的原始会话快照，然后总结上台电脑做到哪里、未完成事项、风险，并从未完成事项继续。不要直接覆盖现有工作区。\n")
 	return builder.String()
 }

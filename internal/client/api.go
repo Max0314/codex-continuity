@@ -26,7 +26,7 @@ func NewAPI(cfg Config) *API {
 	return &API{
 		baseURL: strings.TrimRight(cfg.ServerURL, "/"),
 		token:   cfg.Token,
-		client:  &http.Client{Timeout: 10 * time.Minute},
+		client:  &http.Client{Timeout: 30 * time.Minute},
 	}
 }
 
@@ -114,7 +114,7 @@ func (a *API) UploadHandoff(metadata UploadMetadata, encryptedPath string) (mode
 }
 
 func (a *API) ListHandoffs(deviceName string) ([]model.Handoff, error) {
-	path := "/api/v1/client/handoffs?status=pending&target=" + url.QueryEscape(deviceName)
+	path := "/api/v1/client/handoffs?target=" + url.QueryEscape(deviceName)
 	var output struct {
 		Handoffs []model.Handoff `json:"handoffs"`
 	}

@@ -8,7 +8,39 @@ permissions:
   contents: write
 
 jobs:
+  desktop:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.5"
+          cache: true
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build Windows desktop installers
+        shell: pwsh
+        run: .\scripts\build-desktop.ps1
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-desktop
+          path: |
+            release/*.exe
+            release/*.msi
+            release/*.zip
+          if-no-files-found: error
+
   release:
+    needs: desktop
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,17 +75,18 @@ jobs:
           docker build --platform linux/amd64 -t codex-continuity:local .
           docker save codex-continuity:local | gzip -9 > release/codex-continuity-image-linux-amd64.tar.gz
 
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-desktop
+          path: release
+
       - name: Create checksums
         run: |
           cd release
-          sha256sum continuity-windows-amd64.exe continuity-server-linux-amd64 continuity-web.tar.gz codex-continuity-image-linux-amd64.tar.gz > SHA256SUMS.txt
+          rm -f SHA256SUMS.txt
+          find . -maxdepth 1 -type f ! -name "SHA256SUMS.txt" ! -name ".gitkeep" -printf "%f\0" | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
 
       - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            release/continuity-windows-amd64.exe
-            release/continuity-server-linux-amd64
-            release/continuity-web.tar.gz
-            release/codex-continuity-image-linux-amd64.tar.gz
-            release/SHA256SUMS.txt
+          files: release/*
           generate_release_notes: true

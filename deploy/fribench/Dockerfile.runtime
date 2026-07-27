@@ -1,0 +1,12 @@
+FROM scratch
+
+WORKDIR /app
+
+COPY --chmod=0555 continuity-server /app/continuity-server
+COPY web /app/web
+
+USER 1003:1003
+
+EXPOSE 8080
+
+ENTRYPOINT ["/app/continuity-server"]

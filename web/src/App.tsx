@@ -1,7 +1,6 @@
 import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Activity,
-  Bell,
   Check,
   ChevronDown,
   ChevronRight,
@@ -19,7 +18,6 @@ import {
   LogOut,
   Menu,
   Monitor,
-  MoreHorizontal,
   Palette,
   Plus,
   RefreshCw,
@@ -29,6 +27,7 @@ import {
   Settings,
   ShieldCheck,
   Smartphone,
+  TerminalSquare,
   Trash2,
   Users,
   X,
@@ -53,7 +52,7 @@ const navGroups: Array<{
     items: [
       { id: 'overview', label: '总览', icon: Home },
       { id: 'devices', label: '设备', icon: Monitor },
-      { id: 'handoffs', label: '交接记录', icon: Clock3 },
+      { id: 'handoffs', label: '会话快照', icon: Clock3 },
     ],
   },
   {
@@ -61,7 +60,7 @@ const navGroups: Array<{
     items: [
       { id: 'users', label: '用户', icon: Users },
       { id: 'tokens', label: 'API 令牌', icon: KeyRound },
-      { id: 'downloads', label: '客户端下载', icon: Download },
+      { id: 'downloads', label: '桌面客户端', icon: Download },
     ],
   },
   {
@@ -142,7 +141,7 @@ function AppLoading() {
     <div className="app-loading">
       <BrandMark />
       <span className="spinner" />
-      <p>正在连接工作接力服务…</p>
+      <p>正在连接 Codex Continuity 服务…</p>
     </div>
   )
 }
@@ -180,16 +179,16 @@ function Login({
       <section className="login-brand-panel">
         <div className="login-brand-top">
           <BrandMark inverse />
-          <span>Codex 工作接力</span>
+          <span>Codex Continuity</span>
         </div>
         <div className="login-brand-copy">
           <span className="eyebrow">CODEX CONTINUITY</span>
-          <h1>让工作在不同设备之间，安全接力。</h1>
-          <p>一次发布整个工作根目录的项目状态与 Codex 上下文。服务端只保存密文，不需要访问 Codex 网络。</p>
+          <h1>让 Codex 会话在不同设备之间，安全延续。</h1>
+          <p>自动同步工作根目录关联的 Codex 会话快照。服务端只保存密文，不需要访问 Codex 或 OpenAI。</p>
           <div className="login-feature-list">
-            <Feature icon={<ShieldCheck />} title="本机先加密" text="AES-256-GCM 分块加密后再上传" />
-            <Feature icon={<RefreshCw />} title="整机工作区交接" text="无需逐项目、逐对话发布" />
-            <Feature icon={<Server />} title="自有服务器部署" text="Docker Compose 即可运行" />
+            <Feature icon={<ShieldCheck />} title="端到端加密" text="AES-256-GCM 加密后再上传" />
+            <Feature icon={<RefreshCw />} title="自动同步与离线队列" text="无需逐项目、逐对话手动发布" />
+            <Feature icon={<Server />} title="团队设备管理" text="Docker Compose 私有部署" />
           </div>
         </div>
         <div className="login-brand-footer">
@@ -212,11 +211,11 @@ function Login({
         <form className="login-form" onSubmit={submit}>
           <div className="login-mobile-brand">
             <BrandMark />
-            <span>Codex 工作接力</span>
+            <span>Codex Continuity</span>
           </div>
           <span className="form-kicker">欢迎回来</span>
           <h2>登录管理空间</h2>
-          <p className="form-intro">查看设备状态、交接记录与团队成员。</p>
+          <p className="form-intro">查看设备状态、会话快照与团队成员。</p>
           <label>
             <span>邮箱</span>
             <input
@@ -286,11 +285,9 @@ function Header({
           <Menu size={21} />
         </button>
         <BrandMark />
-        <span>Codex 工作接力</span>
+        <span>Codex Continuity</span>
       </div>
-      <button className="workspace-selector">
-        个人空间 <ChevronDown size={15} />
-      </button>
+      <div className="workspace-selector">个人空间</div>
       <div className="header-actions">
         <div className="theme-picker">
           <span>主题</span>
@@ -306,10 +303,6 @@ function Header({
             </button>
           ))}
         </div>
-        <button className="icon-button notification-button" aria-label="通知">
-          <Bell size={20} />
-          <span />
-        </button>
         <div className="account-menu">
           <button className="account-trigger" onClick={() => setAccountOpen((value) => !value)}>
             <span className="avatar">{user.displayName.slice(0, 1)}</span>
@@ -384,7 +377,7 @@ function Sidebar({
         </div>
         <div className="version-row">
           <span>版本</span>
-          <span>v0.1.0</span>
+          <span>v0.3.1</span>
         </div>
       </div>
     </aside>
@@ -394,7 +387,6 @@ function Sidebar({
 function OverviewPage({ onNavigate }: { onNavigate: (page: PageName) => void }) {
   const [data, setData] = useState<Overview | null>(null)
   const [error, setError] = useState('')
-  const [publishOpen, setPublishOpen] = useState(false)
   const load = useCallback(() => {
     setError('')
     api
@@ -408,11 +400,11 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: PageName) => void }) 
     <>
       <PageHeader
         eyebrow="工作台"
-        title="工作接力总览"
+        title="同步总览"
         description="跨设备安全延续 Codex 工作上下文"
         action={
-          <button className="primary-button" onClick={() => setPublishOpen(true)}>
-            <Send size={17} /> 发布本机交接
+          <button className="primary-button" onClick={() => onNavigate('downloads')}>
+            <Download size={17} /> 下载桌面客户端
           </button>
         }
       />
@@ -428,14 +420,14 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: PageName) => void }) 
         <MetricCard
           icon={<Send />}
           tone="amber"
-          label="待接管交接"
+          label="待接收快照"
           value={data?.pendingHandoffs ?? '—'}
           footnote="等待另一台设备"
         />
         <MetricCard
           icon={<Activity />}
           tone="green"
-          label="本月交接"
+          label="本月同步"
           value={data?.monthlyHandoffs ?? '—'}
           footnote="按自然月统计"
         />
@@ -444,18 +436,18 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: PageName) => void }) 
           tone="violet"
           label="存储占用"
           value={data ? humanBytes(data.storageBytes) : '—'}
-          footnote="仅加密交接包"
+          footnote="仅加密会话快照"
         />
       </div>
       <div className="encryption-banner">
         <ShieldCheck size={19} />
-        <span>所有交接内容在上传前已在本机完成加密，服务端只保存密文。</span>
+        <span>所有会话快照在上传前已在本机完成加密，服务端只保存密文。</span>
         <button onClick={() => onNavigate('settings')}>了解安全设计 <ChevronRight size={15} /></button>
       </div>
       <div className="dashboard-grid">
         <Panel
           className="handoff-panel"
-          title="最近交接"
+          title="最近会话快照"
           action={<button className="text-button" onClick={() => onNavigate('handoffs')}>查看全部 <ChevronRight size={15} /></button>}
         >
           <HandoffTable handoffs={data?.recentHandoffs ?? []} loading={!data && !error} />
@@ -475,30 +467,11 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: PageName) => void }) 
           </Panel>
           <Panel title="快捷操作">
             <QuickAction icon={<KeyRound />} title="生成客户端令牌" text="为新电脑创建独立凭据" onClick={() => onNavigate('tokens')} />
-            <QuickAction icon={<Download />} title="下载 Windows 客户端" text="单文件 EXE，无需安装运行时" onClick={() => onNavigate('downloads')} />
+            <QuickAction icon={<Download />} title="下载 Windows 客户端" text="NSIS / MSI，无需命令行配置" onClick={() => onNavigate('downloads')} />
             <QuickAction icon={<Users />} title="邀请团队成员" text="每位成员的数据相互隔离" onClick={() => onNavigate('users')} />
           </Panel>
         </div>
       </div>
-      {publishOpen && (
-        <Modal title="发布本机交接" onClose={() => setPublishOpen(false)}>
-          <div className="instruction-callout">
-            <Laptop size={22} />
-            <div>
-              <strong>此操作由本机客户端执行</strong>
-              <p>管理网页在服务器上，无法直接读取本机项目与 Codex 会话。客户端会一次扫描整个固定工作根目录。</p>
-            </div>
-          </div>
-          <CodeCopy value="continuity publish --target 公司电脑" />
-          <p className="muted-copy">后续托盘版可把这一步变为右下角菜单的一次点击，并支持退出 Codex 后自动发布。</p>
-          <div className="modal-actions">
-            <button className="secondary-button" onClick={() => setPublishOpen(false)}>知道了</button>
-            <button className="primary-button" onClick={() => { setPublishOpen(false); onNavigate('downloads') }}>
-              <Download size={17} /> 获取客户端
-            </button>
-          </div>
-        </Modal>
-      )}
     </>
   )
 }
@@ -529,7 +502,6 @@ function DevicesPage() {
                 <div className="device-meta">
                   <small>最后活动</small><span>{relativeTime(device.lastSeenAt)}</span>
                 </div>
-                <button className="icon-button"><MoreHorizontal size={19} /></button>
               </div>
             ))}
           </div>
@@ -547,8 +519,8 @@ function HandoffsPage() {
   }, [])
   return (
     <>
-      <PageHeader eyebrow="工作台" title="交接记录" description="查看整机工作区快照的发布与接管状态" />
-      <Panel title={`全部交接 ${items.length ? `(${items.length})` : ''}`}>
+      <PageHeader eyebrow="工作台" title="会话快照" description="查看跨设备加密快照的同步与接收状态" />
+      <Panel title={`全部会话快照 ${items.length ? `(${items.length})` : ''}`}>
         <HandoffTable handoffs={items} loading={loading} detailed />
       </Panel>
     </>
@@ -566,7 +538,7 @@ function UsersPage({ currentUser }: { currentUser: User }) {
       <PageHeader
         eyebrow="管理"
         title="用户"
-        description="为同事创建独立账号；设备、令牌和交接数据按用户隔离"
+        description="为同事创建独立账号；设备、令牌和会话快照数据按用户隔离"
         action={<button className="primary-button" onClick={() => setDialogOpen(true)}><Plus size={17} /> 新建用户</button>}
       />
       {error && <ErrorBanner message={error} retry={load} />}
@@ -689,30 +661,58 @@ function CreateTokenModal({ onClose, onCreated }: { onClose: () => void; onCreat
 }
 
 function DownloadsPage() {
+  const [devices, setDevices] = useState<Device[]>([])
+
+  useEffect(() => {
+    api.devices().then((result) => setDevices(result.devices)).catch(() => setDevices([]))
+  }, [])
+
+  const currentVersion = '0.3.1'
+  const currentCount = devices.filter((device) => device.clientVersion === currentVersion).length
+  const outdatedCount = devices.filter((device) => device.clientVersion && device.clientVersion !== currentVersion).length
   return (
     <>
-      <PageHeader eyebrow="管理" title="客户端下载" description="Windows 客户端是单文件程序，不依赖本机 Node、Python 或 Go 环境" />
-      <div className="download-layout">
-        <Panel className="download-hero">
+      <PageHeader eyebrow="管理" title="桌面客户端" description="统一分发 Windows 桌面程序，并查看团队设备的安装与版本状态" />
+      <div className="client-release-grid">
+        <Panel className="download-hero desktop-release-hero">
           <div className="download-product">
             <span className="download-icon"><Code2 /></span>
             <div>
               <span className="eyebrow">WINDOWS 10 / 11 · X64</span>
-              <h2>Codex Continuity Client</h2>
-              <p>扫描整个固定工作根目录，在本机加密后发布，并在另一台电脑安全接管。</p>
+              <h2>Codex Continuity 桌面版</h2>
+              <p>提供可视化配置、系统托盘、自动同步、离线队列、加密导入导出与跨设备续接，无需使用 PowerShell。</p>
             </div>
           </div>
-          <a className="primary-button download-button" href="/downloads/continuity-windows-amd64.exe">
-            <Download size={18} /> 下载 Windows 客户端
-          </a>
-          <div className="download-meta"><span>版本 v0.1.0</span><span>单文件 EXE</span><span>SHA-256 随发布产物提供</span></div>
+          <div className="desktop-download-actions">
+            <a className="primary-button download-button" href="/downloads/codex-continuity_0.3.1_x64-setup.exe">
+              <Download size={18} /> 下载安装程序
+            </a>
+            <a className="secondary-button" href="/downloads/codex-continuity_0.3.1_x64_zh-CN.msi">
+              下载 MSI
+            </a>
+          </div>
+          <div className="download-meta"><span>版本 v{currentVersion}</span><span>NSIS / MSI</span><span>支持静默安装</span><span>内置离线 WebView2</span></div>
         </Panel>
-        <Panel title="首次配置">
+        <Panel title="版本覆盖" className="release-status-card">
+          <div className="release-metrics">
+            <div><span>登记设备</span><strong>{devices.length}</strong><small>已连接过服务端</small></div>
+            <div><span>当前版本</span><strong>{currentCount}</strong><small>v{currentVersion}</small></div>
+            <div className={outdatedCount ? 'needs-update' : ''}><span>待升级</span><strong>{outdatedCount}</strong><small>{outdatedCount ? '建议尽快更新' : '全部已更新'}</small></div>
+          </div>
+          <div className="release-security"><ShieldCheck size={18} /><span><strong>客户端安装包需要代码签名</strong><small>正式分发前配置组织的 Windows EV/OV 签名证书。</small></span></div>
+        </Panel>
+        <Panel title="安装与激活" className="desktop-onboarding">
           <ol className="step-list">
-            <li><span>1</span><div><strong>创建 API 令牌</strong><p>在“API 令牌”页面为当前电脑创建凭据。</p></div></li>
-            <li><span>2</span><div><strong>初始化客户端</strong><CodeCopy value={'continuity init --server https://你的域名 --token ct_xxx --root D:\\code_CPL --device 办公室电脑'} /></div></li>
-            <li><span>3</span><div><strong>在第二台电脑复用加密密钥</strong><p>执行 init 时增加 <code>--key 第一次生成的密钥</code>。</p></div></li>
+            <li><span>1</span><div><strong>下载安装程序</strong><p>双击安装后自动打开主窗口，并在系统托盘保持运行。</p></div></li>
+            <li><span>2</span><div><strong>创建客户端令牌</strong><p>在“API 令牌”页面创建凭据，复制到桌面客户端的基础配置。</p></div></li>
+            <li><span>3</span><div><strong>完成两项测试</strong><p>依次执行“连接测试”和“加密上传测试”，通过后客户端会自动同步。</p></div></li>
           </ol>
+        </Panel>
+        <Panel title="兼容与批量部署" className="deployment-options">
+          <div className="deployment-option"><Rocket size={18} /><span><strong>个人安装</strong><small>使用 NSIS 安装程序，当前用户无需管理员权限。</small></span></div>
+          <div className="deployment-option"><Laptop size={18} /><span><strong>企业批量安装</strong><small>通过 MSI、Intune 或 SCCM 静默分发到团队电脑。</small></span></div>
+          <div className="deployment-option"><TerminalSquare size={18} /><span><strong>命令行兼容</strong><small>保留 Go 核心程序，自动化脚本可继续使用。</small></span></div>
+          <a className="legacy-download" href="/downloads/continuity-windows-amd64.exe"><Download size={15} /> 下载旧版命令行核心 v0.1.0</a>
         </Panel>
       </div>
     </>
@@ -747,7 +747,7 @@ function SettingsPage({ theme, setTheme }: { theme: ThemeName; setTheme: (theme:
         <Panel title="产品边界">
           <div className="boundary-copy">
             <ShieldCheck />
-            <p>当前版本不会修改目标电脑的 Codex 内部数据库，也不会声称把运行中的原任务原样迁移。它保存发布瞬间的工作区、Git 状态和相关会话只读快照，接管时生成明确的继续入口。</p>
+            <p>当前版本不会修改目标电脑的 Codex 内部数据库，也不会声称把运行中的原任务原样迁移。它保存同步瞬间的工作区、Git 状态和相关会话只读快照，并在另一台电脑生成明确的续接入口。</p>
           </div>
         </Panel>
       </div>
@@ -784,21 +784,20 @@ function Panel({ title, action, className = '', children }: { title?: string; ac
 
 function HandoffTable({ handoffs, loading, detailed = false }: { handoffs: Handoff[]; loading: boolean; detailed?: boolean }) {
   if (loading) return <SkeletonRows count={4} />
-  if (!handoffs.length) return <EmptyState icon={<Send />} text="还没有交接记录。客户端执行 publish 后会显示在这里。" />
+  if (!handoffs.length) return <EmptyState icon={<Send />} text="还没有会话快照。客户端完成首次同步后会显示在这里。" />
   return (
     <div className="data-table-wrap">
       <table className="data-table handoff-table">
-        <thead><tr><th>工作区</th><th>来源设备</th><th>目标设备</th><th>状态</th>{detailed && <th>大小</th>}<th>更新时间</th><th /></tr></thead>
+        <thead><tr><th>工作区</th><th>来源设备</th><th>目标设备</th><th>状态</th>{detailed && <th>大小</th>}<th>更新时间</th></tr></thead>
         <tbody>
           {handoffs.map((handoff, index) => (
             <tr key={handoff.id}>
               <td><div className="project-cell"><span className={`project-icon tone-${index % 3}`}><Code2 /></span><div><strong>{handoff.projectName}</strong><small>{handoff.workspaceKey}</small></div></div></td>
               <td><div className="device-table-cell"><Monitor size={14} /><span>{handoff.sourceDeviceName}</span></div></td>
               <td>{handoff.targetDeviceName || <span className="muted">任意设备</span>}</td>
-              <td><span className={`status-badge ${handoff.status === 'claimed' ? 'success' : 'pending'}`}><i /> {handoff.status === 'claimed' ? '已完成' : '待接管'}</span></td>
+              <td><span className={`status-badge ${handoff.status === 'claimed' ? 'success' : 'pending'}`}><i /> {handoff.status === 'claimed' ? '已接收' : '可接收'}</span></td>
               {detailed && <td>{humanBytes(handoff.blobSize)}</td>}
               <td>{relativeTime(handoff.createdAt)}</td>
-              <td><button className="icon-button"><MoreHorizontal size={18} /></button></td>
             </tr>
           ))}
         </tbody>

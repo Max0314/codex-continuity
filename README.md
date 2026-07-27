@@ -1,26 +1,31 @@
-# Codex Continuity（Codex 工作接力）
+# Codex Continuity
 
-在两台 Windows 电脑之间安全交接整个工作根目录的 Git 状态与 Codex 会话快照。
+在两台 Windows 电脑之间自动同步固定工作根目录关联的 Codex 会话，并提供可靠的跨设备续接入口。
 
-当前实现采用一个仓库、两套发布物：
+当前实现采用一个仓库、两个部署单元：
 
-- `continuity-windows-amd64.exe`：运行在办公室电脑和公司电脑上的客户端；
+- `Codex Continuity`：运行在办公室电脑和公司电脑上的 Tauri 桌面客户端，内置 Go 同步核心；
 - `continuity-server`：运行在个人 Linux 云服务器上的服务端，随 Docker Compose 部署，并提供管理网页。
 
-服务端不调用 Codex 或 OpenAI，也不要求海外网络。交接内容在客户端使用 AES-256-GCM 分块加密，服务端只保存密文。
+服务端不调用 Codex 或 OpenAI，也不要求海外网络。会话快照在客户端使用 AES-256-GCM 分块加密，服务端只保存密文。
 
 ## 已实现
 
 - 管理员/成员登录和用户隔离；
 - 每台设备独立 API 令牌；
 - 设备注册和在线状态；
-- 整个固定工作根目录一次发布；
+- 整个固定工作根目录统一扫描，无需逐项目操作；
 - Git 分支、提交、变更文件和有限补丁采集；
 - 与工作根目录相关的 Codex 原始会话只读快照；
-- 加密上传、列表、下载、解密与接管；
+- 变化检测、后台自动同步、失败持久化队列与恢复重试；
+- 会话列表、搜索、筛选、导入导出与跨设备续接；
 - `bi_center` 风格管理端；
+- `bi_center` 风格 Windows 桌面主窗口；
+- 系统托盘右键快捷窗口、开机后台启动和单实例；
+- 图形化配置、连通测试与加密上传测试；
+- Windows 凭据管理器保护本机令牌和共享密钥；
 - 蓝色、青绿、紫色主题切换；
-- Windows 单文件客户端和 Linux 服务端构建；
+- Windows NSIS/MSI/便携版和 Linux 服务端构建；
 - Docker Compose 服务端部署。
 
 ## 快速启动服务端
@@ -45,7 +50,25 @@ docker compose up -d --no-build
 
 此后服务运行不访问 Codex/OpenAI 或外部 CDN。
 
-## 构建
+## 启动桌面客户端
+
+普通用户无需打开 PowerShell：下载安装程序后，从开始菜单打开“Codex Continuity”，随后在“设置”页完成配置。
+
+开发环境从仓库根目录运行：
+
+```powershell
+.\scripts\dev-desktop.ps1
+```
+
+构建 Windows 安装包：
+
+```powershell
+.\scripts\build-desktop.ps1
+```
+
+详细说明见 [桌面客户端](docs/desktop-client.md)。
+
+## 构建服务端与兼容命令行核心
 
 Windows PowerShell：
 
@@ -61,41 +84,18 @@ Windows PowerShell：
 
 有 Docker 的构建机还可以执行 `.\scripts\export-image.ps1`，生成供离线服务器导入的镜像包。
 
-## 客户端基本流程
+## 图形客户端基本流程
 
-先在管理网页创建“办公室电脑”的 API 令牌：
+1. 在服务端管理网页的“API 令牌”页，为每台电脑创建独立令牌；
+2. 第一台电脑打开桌面端“设置”，填写服务器、`D:\code_CPL`、设备名称和令牌；
+3. 保存时自动生成共享加密密钥；把它安全复制到第二台电脑；
+4. 两台电脑分别完成“连通测试”和“加密上传测试”；
+5. 保持自动同步开启；到另一台电脑后在“会话”页选择目标任务并点击“在此设备继续”。
 
-```powershell
-.\continuity-windows-amd64.exe init `
-  --server https://continuity.example.com `
-  --token ct_xxx `
-  --root D:\code_CPL `
-  --device 办公室电脑
-```
-
-第一次会生成一份用户加密密钥。安全复制到第二台电脑，并在第二台执行：
-
-```powershell
-.\continuity-windows-amd64.exe init `
-  --server https://continuity.example.com `
-  --token ct_另一台设备令牌 `
-  --root D:\code_CPL `
-  --device 公司电脑 `
-  --key 第一台电脑生成的密钥
-```
-
-发布和接管：
-
-```powershell
-continuity publish --target 公司电脑
-continuity list
-continuity takeover
-```
-
-`publish` 默认扫描整个 `D:\code_CPL`，无需逐项目打开 Codex 任务，也不需要 `@MCP`。
+客户端默认扫描整个 `D:\code_CPL`，无需逐项目打开 Codex 任务，也不需要 `@MCP`。兼容 CLI 仍保留给脚本和自动化使用。
 
 ## 重要边界
 
-本工具不会覆盖目标电脑的 Codex 内部数据库，也不会承诺把运行中的原任务 ID 原样迁移。它保存“发布瞬间”的工作状态，接管后生成 `HANDOFF.md` 作为新任务的可靠继续入口。发布后新产生的消息需要再次发布才能进入下一份快照。
+本工具不会覆盖目标电脑的 Codex 内部数据库，也不会承诺把运行中的原任务 ID 原样迁移。它保存会话变化后的加密快照，并在另一台电脑生成 `HANDOFF.md` 作为可靠继续入口。
 
 详细资料见 [docs/README.md](docs/README.md)。

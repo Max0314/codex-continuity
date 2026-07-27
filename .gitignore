@@ -1,5 +1,10 @@
 **/node_modules/
 web/dist/
+desktop/dist/
+desktop/src-tauri/target/
+desktop/src-tauri/binaries/
+desktop/src-tauri/icons/android/
+desktop/src-tauri/icons/ios/
 *.tsbuildinfo
 .vite/
 .env

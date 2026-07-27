@@ -2,12 +2,13 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,6 +21,13 @@ import (
 type contextKey string
 
 const userContextKey contextKey = "user"
+
+const (
+	uploadMultipartOverheadBytes = 8 << 20
+	maxUploadMetadataBytes       = 8 << 20
+)
+
+var errUploadTooLarge = errors.New("upload exceeds configured blob limit")
 
 type HTTPServer struct {
 	cfg   Config
@@ -45,6 +53,7 @@ func NewHTTPServer(cfg Config, store *Store, logger *slog.Logger) http.Handler {
 	mux.Handle("POST /api/v1/users", s.withAdmin(http.HandlerFunc(s.createUser)))
 
 	mux.Handle("POST /api/v1/client/devices", s.withAPIToken(http.HandlerFunc(s.registerDevice)))
+	mux.Handle("POST /api/v1/client/diagnostics/upload-test", s.withAPIToken(http.HandlerFunc(s.uploadTest)))
 	mux.Handle("GET /api/v1/client/handoffs", s.withAPIToken(http.HandlerFunc(s.clientHandoffs)))
 	mux.Handle("POST /api/v1/client/handoffs", s.withAPIToken(http.HandlerFunc(s.uploadHandoff)))
 	mux.Handle("GET /api/v1/client/handoffs/{id}/blob", s.withAPIToken(http.HandlerFunc(s.downloadHandoff)))
@@ -223,6 +232,29 @@ func (s *HTTPServer) registerDevice(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"device": result})
 }
 
+func (s *HTTPServer) uploadTest(w http.ResponseWriter, r *http.Request) {
+	const maxDiagnosticUpload = 1 << 20
+	started := time.Now()
+	reader := http.MaxBytesReader(w, r.Body, maxDiagnosticUpload)
+	defer reader.Close()
+	payload, err := io.ReadAll(reader)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "上传测试包无效或超过 1 MB")
+		return
+	}
+	if len(payload) < 28 {
+		writeError(w, http.StatusBadRequest, "上传测试包过小")
+		return
+	}
+	digest := sha256.Sum256(payload)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"receivedBytes": len(payload),
+		"sha256":        hex.EncodeToString(digest[:]),
+		"discarded":     true,
+		"durationMs":    time.Since(started).Milliseconds(),
+	})
+}
+
 func (s *HTTPServer) clientHandoffs(w http.ResponseWriter, r *http.Request) {
 	result, err := s.store.ListHandoffs(currentUser(r).ID, 100)
 	if err != nil {
@@ -253,40 +285,99 @@ type uploadMetadata struct {
 }
 
 func (s *HTTPServer) uploadHandoff(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes)
-	if err := r.ParseMultipartForm(16 << 20); err != nil {
-		writeError(w, http.StatusBadRequest, "上传包无效或超过大小限制")
+	defer r.Body.Close()
+	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes+uploadMultipartOverheadBytes)
+	reader, err := r.MultipartReader()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "上传请求必须使用 multipart/form-data")
 		return
 	}
-	if r.MultipartForm != nil {
-		defer r.MultipartForm.RemoveAll()
+
+	var rawMetadata []byte
+	var absolutePath string
+	var relativePath string
+	var size int64
+	cleanupBlob := func() {
+		if absolutePath != "" {
+			_ = os.Remove(absolutePath)
+		}
 	}
+	for {
+		part, partErr := reader.NextPart()
+		if errors.Is(partErr, io.EOF) {
+			break
+		}
+		if partErr != nil {
+			cleanupBlob()
+			writeError(w, http.StatusRequestEntityTooLarge, "上传内容超过服务端大小限制")
+			return
+		}
+		switch part.FormName() {
+		case "metadata":
+			payload, readErr := io.ReadAll(io.LimitReader(part, maxUploadMetadataBytes+1))
+			_ = part.Close()
+			if readErr != nil {
+				cleanupBlob()
+				writeError(w, http.StatusBadRequest, "metadata 读取失败")
+				return
+			}
+			if len(payload) > maxUploadMetadataBytes {
+				cleanupBlob()
+				writeError(w, http.StatusRequestEntityTooLarge, "metadata 超过 8 MiB 限制")
+				return
+			}
+			rawMetadata = payload
+		case "blob":
+			if absolutePath != "" {
+				_ = part.Close()
+				cleanupBlob()
+				writeError(w, http.StatusBadRequest, "只能上传一个加密 blob")
+				return
+			}
+			blobName := newID() + ".ccx"
+			relativePath = filepath.Join("blobs", blobName)
+			absolutePath = filepath.Join(s.cfg.DataDir, relativePath)
+			size, err = saveUpload(part, absolutePath, s.cfg.MaxUploadBytes)
+			_ = part.Close()
+			if errors.Is(err, errUploadTooLarge) {
+				cleanupBlob()
+				writeError(
+					w,
+					http.StatusRequestEntityTooLarge,
+					fmt.Sprintf("加密同步包超过 %d MiB 上限", s.cfg.MaxUploadBytes/(1024*1024)),
+				)
+				return
+			}
+			if err != nil {
+				cleanupBlob()
+				s.internalError(w, err)
+				return
+			}
+		default:
+			_, _ = io.Copy(io.Discard, part)
+			_ = part.Close()
+		}
+	}
+
 	var metadata uploadMetadata
-	if raw := r.FormValue("metadata"); raw == "" || json.Unmarshal([]byte(raw), &metadata) != nil {
+	if len(rawMetadata) == 0 || json.Unmarshal(rawMetadata, &metadata) != nil {
+		cleanupBlob()
 		writeError(w, http.StatusBadRequest, "metadata 无效")
 		return
 	}
 	user := currentUser(r)
 	if !s.store.DeviceOwnedBy(user.ID, metadata.SourceDeviceID) {
+		cleanupBlob()
 		writeError(w, http.StatusBadRequest, "来源设备无效")
 		return
 	}
-	file, header, err := r.FormFile("blob")
-	if err != nil {
+	if absolutePath == "" {
 		writeError(w, http.StatusBadRequest, "缺少加密 blob")
 		return
 	}
-	defer file.Close()
-	if header.Size <= 0 {
+	if size <= 0 {
+		cleanupBlob()
 		writeError(w, http.StatusBadRequest, "加密 blob 为空")
-		return
-	}
-	blobName := newID() + ".ccx"
-	relativePath := filepath.Join("blobs", blobName)
-	absolutePath := filepath.Join(s.cfg.DataDir, relativePath)
-	size, err := saveUpload(file, absolutePath)
-	if err != nil {
-		s.internalError(w, err)
 		return
 	}
 	handoff, err := s.store.CreateHandoff(CreateHandoffParams{
@@ -433,11 +524,42 @@ func (s *HTTPServer) securityHeaders(next http.Handler) http.Handler {
 func (s *HTTPServer) requestLog(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		started := time.Now()
-		next.ServeHTTP(w, r)
+		recorder := &statusResponseWriter{ResponseWriter: w}
+		next.ServeHTTP(recorder, r)
 		if !strings.HasPrefix(r.URL.Path, "/assets/") {
-			s.log.Info("http request", "method", r.Method, "path", r.URL.Path, "duration", time.Since(started))
+			s.log.Info(
+				"http request",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", recorder.status,
+				"bytes", recorder.bytes,
+				"duration", time.Since(started),
+			)
 		}
 	})
+}
+
+type statusResponseWriter struct {
+	http.ResponseWriter
+	status int
+	bytes  int64
+}
+
+func (w *statusResponseWriter) WriteHeader(status int) {
+	if w.status != 0 {
+		return
+	}
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *statusResponseWriter) Write(payload []byte) (int, error) {
+	if w.status == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	written, err := w.ResponseWriter.Write(payload)
+	w.bytes += int64(written)
+	return written, err
 }
 
 func (s *HTTPServer) recoverer(next http.Handler) http.Handler {
@@ -457,18 +579,26 @@ func (s *HTTPServer) internalError(w http.ResponseWriter, err error) {
 	writeError(w, http.StatusInternalServerError, "服务内部错误")
 }
 
-func saveUpload(src multipart.File, destination string) (int64, error) {
+func saveUpload(src io.Reader, destination string, maxBytes int64) (int64, error) {
 	dst, err := os.OpenFile(destination, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return 0, err
 	}
-	size, copyErr := io.Copy(dst, src)
+	size, copyErr := io.Copy(dst, io.LimitReader(src, maxBytes+1))
 	closeErr := dst.Close()
 	if copyErr != nil {
 		_ = os.Remove(destination)
 		return 0, copyErr
 	}
-	return size, closeErr
+	if closeErr != nil {
+		_ = os.Remove(destination)
+		return 0, closeErr
+	}
+	if size > maxBytes {
+		_ = os.Remove(destination)
+		return 0, errUploadTooLarge
+	}
+	return size, nil
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, destination any) bool {

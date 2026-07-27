@@ -30,7 +30,7 @@ func LoadConfig() (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("resolve data directory: %w", err)
 	}
-	maxMiB, err := strconv.ParseInt(env("CONTINUITY_MAX_UPLOAD_MIB", "512"), 10, 64)
+	maxMiB, err := strconv.ParseInt(env("CONTINUITY_MAX_UPLOAD_MIB", "500"), 10, 64)
 	if err != nil || maxMiB < 1 {
 		return Config{}, fmt.Errorf("CONTINUITY_MAX_UPLOAD_MIB must be a positive integer")
 	}

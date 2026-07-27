@@ -13,7 +13,7 @@ func TestEncryptDecryptRoundTrip(t *testing.T) {
 	source := filepath.Join(dir, "source.bin")
 	encrypted := filepath.Join(dir, "encrypted.ccx")
 	decrypted := filepath.Join(dir, "decrypted.bin")
-	payload := bytes.Repeat([]byte("Codex 工作接力\n"), 400_000)
+	payload := bytes.Repeat([]byte("Codex Continuity\n"), 400_000)
 	if err := os.WriteFile(source, payload, 0o600); err != nil {
 		t.Fatal(err)
 	}
