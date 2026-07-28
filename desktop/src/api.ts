@@ -25,10 +25,11 @@ let currentSettings: PublicSettings = {
   syncDays: 7,
   selectedProjects: [],
   includeArchived: false,
+  includeUnassigned: false,
   maxBundleMiB: 500,
   hasToken: true,
   hasEncryptionKey: true,
-  version: '0.3.1',
+  version: '0.3.2',
 }
 
 const mockConversations: Conversation[] = [
@@ -228,6 +229,15 @@ async function chooseArchive(mode: 'open' | 'save') {
   })
 }
 
+async function chooseDiagnosticReport() {
+  if (!isTauri) return 'D:\\Downloads\\codex-continuity-diagnostics.json'
+  const dialog = await import('@tauri-apps/plugin-dialog')
+  return dialog.save({
+    defaultPath: `codex-continuity-diagnostics-${new Date().toISOString().slice(0, 10)}.json`,
+    filters: [{ name: 'Codex Continuity 诊断报告', extensions: ['json'] }],
+  })
+}
+
 export const desktopApi = {
   dashboard: () =>
     isTauri ? invoke<DashboardSnapshot>('get_dashboard') : mockDelay({ ...mockSnapshot, settings: currentSettings }),
@@ -310,6 +320,18 @@ export const desktopApi = {
     return isTauri
       ? invoke<ArchiveResult>('import_archive', { input })
       : mockDelay({ ok: true, message: '归档已导入到本地续接目录', path: input })
+  },
+
+  exportDiagnostics: async () => {
+    const output = await chooseDiagnosticReport()
+    if (!output) return { ok: false, message: '已取消导出' } satisfies ArchiveResult
+    return isTauri
+      ? invoke<ArchiveResult>('export_diagnostics', { output })
+      : mockDelay({
+          ok: true,
+          message: '脱敏诊断报告已导出，不包含凭据、密钥、路径或会话内容',
+          path: output,
+        })
   },
 
   setAutoSync: async (enabled: boolean) => {

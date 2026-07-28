@@ -8,7 +8,8 @@ import (
 func TestEffectiveSyncScopeUsesSafeDefaultsForLegacyConfig(t *testing.T) {
 	t.Parallel()
 	scope := (Config{}).EffectiveSyncScope()
-	if scope.Days != 7 || scope.IncludeArchived || scope.MaxBundleMiB != 500 || len(scope.ProjectPaths) != 0 {
+	if scope.Days != 7 || scope.IncludeArchived || scope.IncludeUnassigned ||
+		scope.MaxBundleMiB != 500 || len(scope.ProjectPaths) != 0 {
 		t.Fatalf("unexpected legacy defaults: %#v", scope)
 	}
 }

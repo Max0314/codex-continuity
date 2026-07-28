@@ -208,6 +208,15 @@ function DesktopApp() {
     false,
   )
 
+  const exportDiagnostics = () => runAction(
+    'diagnostics',
+    desktopApi.exportDiagnostics,
+    (result) => {
+      if (result.ok) setToast({ tone: 'success', text: result.message })
+    },
+    false,
+  )
+
   return (
     <div className="desktop-shell">
       <TopBar settings={snapshot.settings} connection={snapshot.connection} onMenu={() => setSidebarOpen((value) => !value)} />
@@ -227,6 +236,13 @@ function DesktopApp() {
             onSync={syncNow}
             onImport={importArchive}
             onExport={exportArchive}
+            onEditSyncScope={() => {
+              navigate('settings')
+              window.setTimeout(
+                () => document.getElementById('sync-scope-settings')?.scrollIntoView({ block: 'start' }),
+                0,
+              )
+            }}
             onContinue={continueConversation}
           />
         ) : null}
@@ -240,7 +256,7 @@ function DesktopApp() {
               () => desktopApi.setAutoSync(enabled),
               () => setToast({ tone: 'success', text: enabled ? '自动同步已开启' : '自动同步已暂停' }),
             )}
-            onExport={exportArchive}
+            onExportDiagnostics={exportDiagnostics}
           />
         ) : null}
         {page === 'settings' ? (
@@ -334,18 +350,29 @@ function Sidebar({ page, open, snapshot, onSelect }: {
   )
 }
 
-function ConversationsPage({ snapshot, busy, requestedConversationId, onSync, onImport, onExport, onContinue }: {
+function ConversationsPage({
+  snapshot,
+  busy,
+  requestedConversationId,
+  onSync,
+  onImport,
+  onExport,
+  onEditSyncScope,
+  onContinue,
+}: {
   snapshot: DashboardSnapshot
   busy: string
   requestedConversationId: string
   onSync: () => void
   onImport: () => void
   onExport: () => void
+  onEditSyncScope: () => void
   onContinue: (conversation: Conversation) => void
 }) {
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<StatusFilter>('all')
   const [timeRange, setTimeRange] = useState<TimeRange>('7d')
+  const [projectFilter, setProjectFilter] = useState('all')
   const [selectedId, setSelectedId] = useState(snapshot.conversations[0]?.id || '')
   const [expandedProjects, setExpandedProjects] = useState<Set<string>>(() => new Set())
   const [fullyExpandedProjects, setFullyExpandedProjects] = useState<Set<string>>(() => new Set())
@@ -378,9 +405,17 @@ function ConversationsPage({ snapshot, busy, requestedConversationId, onSync, on
       const updatedAt = new Date(conversation.updatedAt).getTime()
       return matchesQuery
         && updatedAt >= timeCutoff
+        && (projectFilter === 'all' || conversation.projectName === projectFilter)
         && (filter === 'all' || conversation.syncStatus === filter)
     })
-  }, [filter, query, snapshot.conversations, timeRange])
+  }, [filter, projectFilter, query, snapshot.conversations, timeRange])
+
+  const projectOptions = useMemo(
+    () => Array.from(new Set(snapshot.conversations.map((conversation) => conversation.projectName)))
+      .filter(Boolean)
+      .sort((left, right) => left.localeCompare(right, 'zh-CN')),
+    [snapshot.conversations],
+  )
 
   const projectGroups = useMemo<ConversationProjectGroup[]>(() => {
     const groups = new Map<string, Conversation[]>()
@@ -470,7 +505,7 @@ function ConversationsPage({ snapshot, busy, requestedConversationId, onSync, on
               {busy === 'sync' ? <Spinner /> : <RefreshCw size={17} />}立即同步
             </button>
             <button className="secondary-button" onClick={onImport} disabled={busy === 'import'}>
-              {busy === 'import' ? <Spinner /> : <Import size={17} />}导入记录
+              {busy === 'import' ? <Spinner /> : <Import size={17} />}打开加密归档
             </button>
           </>
         )}
@@ -483,6 +518,18 @@ function ConversationsPage({ snapshot, busy, requestedConversationId, onSync, on
               <Search size={17} />
               <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索会话标题或项目" />
               {query ? <button onClick={() => setQuery('')} aria-label="清空搜索"><X size={15} /></button> : null}
+            </label>
+            <label className="filter-field project-filter">
+              <FolderGit2 size={16} />
+              <select
+                value={projectFilter}
+                onChange={(event) => setProjectFilter(event.target.value)}
+                aria-label="查看项目"
+              >
+                <option value="all">全部项目</option>
+                {projectOptions.map((project) => <option key={project} value={project}>{project}</option>)}
+              </select>
+              <ChevronDown size={15} />
             </label>
             <label className="filter-field">
               <ListFilter size={16} />
@@ -506,8 +553,14 @@ function ConversationsPage({ snapshot, busy, requestedConversationId, onSync, on
               </select>
               <ChevronDown size={15} />
             </label>
+            <button className="scope-editor-link" onClick={onEditSyncScope}>
+              <Settings size={15} />
+              同步范围：{snapshot.settings.selectedProjects.length
+                ? `${snapshot.settings.selectedProjects.length}个项目`
+                : '全部项目'} · {snapshot.settings.syncDays ? `${snapshot.settings.syncDays}天` : '不限时间'}
+            </button>
             <button className="toolbar-link" onClick={onExport} disabled={busy === 'export'}>
-              <ArrowUpFromLine size={16} />导出加密归档
+              <ArrowUpFromLine size={16} />导出离线备份
             </button>
           </div>
 
@@ -577,9 +630,9 @@ function ConversationsPage({ snapshot, busy, requestedConversationId, onSync, on
 
         <ConversationDetail
           conversation={selected}
+          root={snapshot.settings.root}
           busy={selected ? busy === `continue:${selected.id}` : false}
           onContinue={() => selected && onContinue(selected)}
-          onExport={onExport}
         />
       </div>
     </div>
@@ -604,7 +657,7 @@ function ConversationRow({ conversation, selected, tone, busy, onSelect, onConti
         <span><strong>{conversation.title}{conversation.archived ? <em className="archive-tag">已归档</em> : null}</strong><small>{conversation.preview}</small></span>
       </button>
       <span className="time-cell"><strong>{displayTime(conversation.updatedAt)}</strong><small>{formatAbsoluteTime(conversation.updatedAt)}</small></span>
-      <span className="device-cell"><Monitor size={15} /><span><strong>{conversation.sourceDeviceName}</strong><small>{conversation.sourceDeviceOS}{conversation.currentDevice ? ' · 当前设备' : ''}</small></span></span>
+      <span className="device-cell"><Monitor size={15} /><span><strong>{conversation.sourceDeviceName}</strong><small>{deviceOSLabel(conversation)}{conversation.currentDevice ? ' · 当前设备' : ''}</small></span></span>
       <span className="status-cell"><StatusBadge status={conversation.syncStatus} /></span>
       <span className="action-cell">
         <button
@@ -620,11 +673,11 @@ function ConversationRow({ conversation, selected, tone, busy, onSelect, onConti
   )
 }
 
-function ConversationDetail({ conversation, busy, onContinue, onExport }: {
+function ConversationDetail({ conversation, root, busy, onContinue }: {
   conversation?: Conversation
+  root: string
   busy: boolean
   onContinue: () => void
-  onExport: () => void
 }) {
   if (!conversation) {
     return <aside className="conversation-detail empty"><MessageSquareText size={28} /><span>选择一条会话查看详情</span></aside>
@@ -633,9 +686,16 @@ function ConversationDetail({ conversation, busy, onContinue, onExport }: {
     <aside className="conversation-detail">
       <div className="detail-header"><strong>{conversation.title}</strong><StatusBadge status={conversation.syncStatus} /></div>
       <div className="detail-body">
-        <DetailLine icon={<Monitor />} label="来源设备" value={`${conversation.sourceDeviceName} · ${conversation.sourceDeviceOS}`} />
+        <DetailLine icon={<Monitor />} label="来源设备" value={`${conversation.sourceDeviceName} · ${deviceOSLabel(conversation)}`} />
         <DetailLine icon={<FolderGit2 />} label="项目" value={conversation.projectName} />
-        <DetailLine icon={<Link2 />} label="工作目录映射" value={`D:\\code_CPL\\${conversation.relativeCwd}`} code />
+        <DetailLine
+          icon={<Link2 />}
+          label="工作目录映射"
+          value={conversation.unassigned
+            ? '无项目会话；跨设备续接时使用本机工作区根目录'
+            : joinWindowsPath(root, conversation.relativeCwd)}
+          code={!conversation.unassigned}
+        />
         <DetailLine icon={<Clock3 />} label="最后更新" value={`${formatAbsoluteTime(conversation.updatedAt)} · ${displayTime(conversation.updatedAt)}`} />
         <DetailLine icon={<FileKey2 />} label="加密大小" value={humanBytes(conversation.size)} />
         <DetailLine
@@ -654,18 +714,17 @@ function ConversationDetail({ conversation, busy, onContinue, onExport }: {
           {busy ? <Spinner /> : <MessageSquareText size={17} />}
           {conversation.continuationMode === 'native-local' ? '定位原任务' : '在此设备继续'}
         </button>
-        <button className="secondary-button square" onClick={onExport} aria-label="导出加密归档"><Download size={17} /></button>
       </div>
     </aside>
   )
 }
 
-function SyncPage({ snapshot, busy, onSync, onAutoSync, onExport }: {
+function SyncPage({ snapshot, busy, onSync, onAutoSync, onExportDiagnostics }: {
   snapshot: DashboardSnapshot
   busy: string
   onSync: () => void
   onAutoSync: (enabled: boolean) => void
-  onExport: () => void
+  onExportDiagnostics: () => void
 }) {
   const pending = snapshot.conversations.filter((item) => ['queued', 'local'].includes(item.syncStatus)).length
   const available = snapshot.conversations.filter((item) => item.syncStatus === 'available').length
@@ -714,7 +773,14 @@ function SyncPage({ snapshot, busy, onSync, onAutoSync, onExport }: {
           </section>
         ) : null}
         <section className="panel activity-panel">
-          <PanelHeader title="最近活动" action={<button className="panel-link" onClick={onExport}><Archive size={15} />导出诊断归档</button>} />
+          <PanelHeader
+            title="最近活动"
+            action={(
+              <button className="panel-link" onClick={onExportDiagnostics} disabled={busy === 'diagnostics'}>
+                <Archive size={15} />导出诊断报告
+              </button>
+            )}
+          />
           <ActivityList items={snapshot.activities} />
         </section>
         <section className="panel security-panel">
@@ -748,6 +814,7 @@ function SettingsPage({ settings, projects, busy, onRun, onSaved, onToast }: {
     syncDays: settings.syncDays,
     selectedProjects: settings.selectedProjects,
     includeArchived: settings.includeArchived,
+    includeUnassigned: settings.includeUnassigned,
     maxBundleMiB: settings.maxBundleMiB,
   })
   const [connection, setConnection] = useState<number | null>(null)
@@ -859,7 +926,7 @@ function SettingsPage({ settings, projects, busy, onRun, onSaved, onToast }: {
               <CopyButton text={generatedKey} />
             </div>
           ) : null}
-          <section className="sync-scope-settings" aria-labelledby="sync-scope-title">
+          <section id="sync-scope-settings" className="sync-scope-settings" aria-labelledby="sync-scope-title">
             <div className="sync-scope-heading">
               <div>
                 <strong id="sync-scope-title">同步范围</strong>
@@ -926,6 +993,12 @@ function SettingsPage({ settings, projects, busy, onRun, onSaved, onToast }: {
                 note="默认关闭；开启后也会扫描 ~/.codex/archived_sessions"
                 checked={form.includeArchived}
                 onChange={(value) => setForm((current) => ({ ...current, includeArchived: value }))}
+              />
+              <SettingToggle
+                title="同步无项目会话"
+                note="默认关闭；开启后会同步工作区根目录之外的会话，但不会上传原始绝对路径"
+                checked={form.includeUnassigned}
+                onChange={(value) => setForm((current) => ({ ...current, includeUnassigned: value }))}
               />
               <div className="bundle-limit">
                 <ShieldCheck size={20} />
@@ -1282,6 +1355,16 @@ function humanBytes(size: number) {
   let index = -1
   do { value /= 1024; index += 1 } while (value >= 1024 && index < units.length - 1)
   return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[index]}`
+}
+
+function deviceOSLabel(conversation: Conversation) {
+  return conversation.sourceDeviceOS?.trim() || '系统未知'
+}
+
+function joinWindowsPath(root: string, relativePath: string) {
+  const cleanRoot = root.replace(/[\\/]+$/, '')
+  const cleanRelative = relativePath.replace(/^[\\/]+/, '').replace(/\//g, '\\')
+  return cleanRelative && cleanRelative !== '.' ? `${cleanRoot}\\${cleanRelative}` : cleanRoot
 }
 
 function displayTime(value?: string, future = false) {

@@ -402,7 +402,7 @@ func (s *Store) ListHandoffs(userID string, limit int) ([]model.Handoff, error) 
 		limit = 50
 	}
 	rows, err := s.db.Query(`
-SELECT h.id,h.project_name,h.workspace_key,h.source_device_id,d.name,
+SELECT h.id,h.project_name,h.workspace_key,h.source_device_id,d.name,d.os,
        h.target_device_name,h.status,h.manifest_json,h.blob_size,h.created_at,h.claimed_at
 FROM handoffs h JOIN devices d ON d.id=h.source_device_id
 WHERE h.user_id=? ORDER BY h.created_at DESC LIMIT ?`, userID, limit)
@@ -423,7 +423,7 @@ WHERE h.user_id=? ORDER BY h.created_at DESC LIMIT ?`, userID, limit)
 
 func (s *Store) HandoffByID(userID, handoffID string) (model.Handoff, string, error) {
 	row := s.db.QueryRow(`
-SELECT h.id,h.project_name,h.workspace_key,h.source_device_id,d.name,
+SELECT h.id,h.project_name,h.workspace_key,h.source_device_id,d.name,d.os,
        h.target_device_name,h.status,h.manifest_json,h.blob_size,h.created_at,h.claimed_at,h.blob_path
 FROM handoffs h JOIN devices d ON d.id=h.source_device_id
 WHERE h.user_id=? AND h.id=?`, userID, handoffID)
@@ -500,7 +500,7 @@ func scanHandoff(row interface{ Scan(...any) error }) (model.Handoff, string, er
 	var claimed sql.NullString
 	err := row.Scan(
 		&h.ID, &h.ProjectName, &h.WorkspaceKey, &h.SourceDeviceID, &h.SourceDeviceName,
-		&h.TargetDeviceName, &h.Status, &manifest, &h.BlobSize, &created, &claimed,
+		&h.SourceDeviceOS, &h.TargetDeviceName, &h.Status, &manifest, &h.BlobSize, &created, &claimed,
 	)
 	if err != nil {
 		return h, "", err
@@ -520,7 +520,7 @@ func scanHandoffWithPath(row interface{ Scan(...any) error }) (model.Handoff, st
 	var claimed sql.NullString
 	err := row.Scan(
 		&h.ID, &h.ProjectName, &h.WorkspaceKey, &h.SourceDeviceID, &h.SourceDeviceName,
-		&h.TargetDeviceName, &h.Status, &manifest, &h.BlobSize, &created, &claimed, &path,
+		&h.SourceDeviceOS, &h.TargetDeviceName, &h.Status, &manifest, &h.BlobSize, &created, &claimed, &path,
 	)
 	if err != nil {
 		return h, "", err

@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.runtime
-    image: codex-continuity:0.3.1-fribench
+    image: codex-continuity:0.3.2-fribench
     container_name: codex-continuity
     restart: unless-stopped
     init: true

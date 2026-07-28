@@ -24,6 +24,7 @@ const (
 	maxSessionFileSize = 128 * 1024 * 1024
 	maxSessionTotal    = 450 * 1024 * 1024
 	maxPatchSize       = 4 * 1024 * 1024
+	unassignedPath     = "__unassigned__"
 )
 
 type Manifest struct {
@@ -313,7 +314,15 @@ func scanSessions(root string, scope SyncScope) ([]SessionState, []string) {
 				return nil
 			}
 			meta, err := readSessionMeta(path)
-			if err != nil || meta.ID == "" || meta.CWD == "" || !isUnderRoot(meta.CWD, root) {
+			if err != nil || meta.ID == "" || meta.CWD == "" {
+				return nil
+			}
+			relativePath, underRoot, selectedForSync := syncSessionPath(
+				meta.CWD,
+				root,
+				scope.IncludeUnassigned,
+			)
+			if !selectedForSync {
 				return nil
 			}
 			if existing, exists := byID[meta.ID]; exists && !existing.Archived {
@@ -323,9 +332,7 @@ func scanSessions(root string, scope SyncScope) ([]SessionState, []string) {
 			if err != nil || (!cutoff.IsZero() && info.ModTime().Before(cutoff)) {
 				return nil
 			}
-			relativeCWD, _ := filepath.Rel(root, meta.CWD)
-			relativePath := filepath.ToSlash(relativeCWD)
-			if !sessionProjectSelected(relativePath, selected) {
+			if underRoot && !sessionProjectSelected(relativePath, selected) {
 				return nil
 			}
 			byID[meta.ID] = SessionState{
@@ -354,6 +361,17 @@ func scanSessions(root string, scope SyncScope) ([]SessionState, []string) {
 		"发布后继续产生的新消息不在本快照内；再次执行 publish 可生成新的交接。",
 	}
 	return sessions, notes
+}
+
+func syncSessionPath(cwd, root string, includeUnassigned bool) (relativePath string, underRoot, selected bool) {
+	if !isUnderRoot(cwd, root) {
+		return unassignedPath, false, includeUnassigned
+	}
+	relativeCWD, err := filepath.Rel(root, cwd)
+	if err != nil {
+		return "", true, false
+	}
+	return filepath.ToSlash(relativeCWD), true, true
 }
 
 func normalizedProjectSet(paths []string) map[string]bool {

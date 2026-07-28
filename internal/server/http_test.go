@@ -134,6 +134,9 @@ func TestLoginAndClientHandoffFlow(t *testing.T) {
 	if len(listPayload.Handoffs) != 1 || listPayload.Handoffs[0].ID != handoffID {
 		t.Fatalf("unexpected handoff list: %#v", listPayload.Handoffs)
 	}
+	if listPayload.Handoffs[0].SourceDeviceOS != "windows/amd64" {
+		t.Fatalf("handoff source OS = %q, want windows/amd64", listPayload.Handoffs[0].SourceDeviceOS)
+	}
 
 	downloadRequest, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/client/handoffs/"+handoffID+"/blob", nil)
 	downloadRequest.Header.Set("Authorization", "Bearer "+tokenPayload.Secret)

@@ -34,6 +34,7 @@ type Handoff struct {
 	WorkspaceKey     string     `json:"workspaceKey"`
 	SourceDeviceID   string     `json:"sourceDeviceId"`
 	SourceDeviceName string     `json:"sourceDeviceName"`
+	SourceDeviceOS   string     `json:"sourceDeviceOS"`
 	TargetDeviceName string     `json:"targetDeviceName,omitempty"`
 	Status           string     `json:"status"`
 	Manifest         any        `json:"manifest,omitempty"`

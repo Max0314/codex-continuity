@@ -15,6 +15,7 @@ export interface PublicSettings {
   syncDays: 0 | 2 | 5 | 7
   selectedProjects: string[]
   includeArchived: boolean
+  includeUnassigned: boolean
   maxBundleMiB: number
   hasToken: boolean
   hasEncryptionKey: boolean
@@ -33,6 +34,7 @@ export interface SaveSettingsRequest {
   syncDays: 0 | 2 | 5 | 7
   selectedProjects: string[]
   includeArchived: boolean
+  includeUnassigned: boolean
   maxBundleMiB: number
 }
 
@@ -61,7 +63,7 @@ export interface Conversation {
   relativeCwd: string
   updatedAt: string
   sourceDeviceName: string
-  sourceDeviceOS: string
+  sourceDeviceOS?: string
   currentDevice: boolean
   local: boolean
   archived: boolean
@@ -70,6 +72,8 @@ export interface Conversation {
   handoffId?: string
   continuationMode: ContinuationMode
   archivePath?: string
+  workspacePath?: string
+  unassigned?: boolean
 }
 
 export interface SyncRuntime {

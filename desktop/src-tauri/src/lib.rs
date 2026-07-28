@@ -19,8 +19,8 @@ use std::{
 };
 use tauri::{
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, PhysicalPosition, Position, State, WebviewUrl, WebviewWindowBuilder,
-    WindowEvent,
+    AppHandle, Manager, PhysicalPosition, PhysicalSize, Position, Size, State, WebviewUrl,
+    WebviewWindowBuilder, WindowEvent,
 };
 use tauri_plugin_autostart::{MacosLauncher, ManagerExt as AutostartExt};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
@@ -50,6 +50,8 @@ struct SettingsFile {
     sync_days: u16,
     selected_projects: Vec<String>,
     include_archived: bool,
+    #[serde(default)]
+    include_unassigned: bool,
     max_bundle_mib: u16,
 }
 
@@ -71,6 +73,7 @@ impl Default for SettingsFile {
             sync_days: 7,
             selected_projects: Vec::new(),
             include_archived: false,
+            include_unassigned: false,
             max_bundle_mib: MAX_BUNDLE_MIB,
         }
     }
@@ -89,6 +92,7 @@ struct PublicSettings {
     sync_days: u16,
     selected_projects: Vec<String>,
     include_archived: bool,
+    include_unassigned: bool,
     max_bundle_mib: u16,
     has_token: bool,
     has_encryption_key: bool,
@@ -109,6 +113,8 @@ struct SaveSettingsRequest {
     sync_days: u16,
     selected_projects: Vec<String>,
     include_archived: bool,
+    #[serde(default)]
+    include_unassigned: bool,
     max_bundle_mib: u16,
 }
 
@@ -176,6 +182,8 @@ struct ManifestSession {
 struct Handoff {
     id: String,
     source_device_name: String,
+    #[serde(default)]
+    source_device_os: String,
     status: String,
     manifest: Option<Manifest>,
     blob_size: i64,
@@ -201,6 +209,8 @@ struct Conversation {
     handoff_id: Option<String>,
     continuation_mode: String,
     archive_path: Option<String>,
+    workspace_path: Option<String>,
+    unassigned: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -357,8 +367,8 @@ fn load_settings_file(app: &AppHandle) -> Result<SettingsFile, String> {
         return Ok(SettingsFile::default());
     }
     let raw = fs::read_to_string(&path).map_err(|error| format!("读取配置失败：{error}"))?;
-    let mut settings =
-        serde_json::from_str::<SettingsFile>(&raw).map_err(|error| format!("配置文件无效：{error}"))?;
+    let mut settings = serde_json::from_str::<SettingsFile>(&raw)
+        .map_err(|error| format!("配置文件无效：{error}"))?;
     if settings.max_bundle_mib == 0 {
         settings.max_bundle_mib = MAX_BUNDLE_MIB;
     }
@@ -423,6 +433,7 @@ fn public_settings(settings: &SettingsFile) -> PublicSettings {
         sync_days: settings.sync_days,
         selected_projects: settings.selected_projects.clone(),
         include_archived: settings.include_archived,
+        include_unassigned: settings.include_unassigned,
         max_bundle_mib: settings.max_bundle_mib,
         has_token: read_secret("api-token").is_some(),
         has_encryption_key: read_secret("encryption-key").is_some(),
@@ -628,7 +639,11 @@ fn scan_local_conversations(settings: &SettingsFile) -> Vec<LocalConversation> {
     for (path, archived) in candidates {
         let item = (|| {
             let (id, cwd) = read_session_meta(&path)?;
-            if id.trim().is_empty() || !is_under_root(&cwd, &root) {
+            if id.trim().is_empty() {
+                return None;
+            }
+            let under_root = is_under_root(&cwd, &root);
+            if !under_root && !settings.include_unassigned {
                 return None;
             }
             let metadata = fs::metadata(&path).ok()?;
@@ -637,9 +652,15 @@ fn scan_local_conversations(settings: &SettingsFile) -> Vec<LocalConversation> {
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_millis() as i64;
-            let relative = cwd.strip_prefix(&root).unwrap_or(&cwd);
-            let relative_cwd = relative.to_string_lossy().replace('\\', "/");
-            let project = project_name(relative, &root);
+            let (relative_cwd, project) = if under_root {
+                let relative = cwd.strip_prefix(&root).unwrap_or(&cwd);
+                (
+                    relative.to_string_lossy().replace('\\', "/"),
+                    project_name(relative, &root),
+                )
+            } else {
+                ("__unassigned__".to_string(), "无项目会话".to_string())
+            };
             let title = names
                 .get(&id)
                 .cloned()
@@ -663,6 +684,8 @@ fn scan_local_conversations(settings: &SettingsFile) -> Vec<LocalConversation> {
                     handoff_id: None,
                     continuation_mode: "native-local".to_string(),
                     archive_path: Some(path.to_string_lossy().to_string()),
+                    workspace_path: Some(cwd.to_string_lossy().to_string()),
+                    unassigned: !under_root,
                 },
                 source_path: path,
                 modified_millis,
@@ -688,9 +711,7 @@ fn scoped_local_conversations(
     let cutoff = if settings.sync_days == 0 {
         None
     } else {
-        Some(
-            (Utc::now() - ChronoDuration::days(settings.sync_days as i64)).timestamp_millis(),
-        )
+        Some((Utc::now() - ChronoDuration::days(settings.sync_days as i64)).timestamp_millis())
     };
     let selected = settings
         .selected_projects
@@ -701,7 +722,8 @@ fn scoped_local_conversations(
         .iter()
         .filter(|item| {
             cutoff.is_none_or(|value| item.modified_millis >= value)
-                && (selected.is_empty()
+                && (item.public.unassigned
+                    || selected.is_empty()
                     || selected.iter().any(|project| {
                         let path = item.public.relative_cwd.to_lowercase();
                         (project == "." && path == ".")
@@ -724,6 +746,9 @@ fn sync_project_options(
         .unwrap_or_else(|| "工作区根目录".to_string());
     let mut grouped = HashMap::<String, SyncProjectOption>::new();
     for item in conversations {
+        if item.public.unassigned {
+            continue;
+        }
         let relative_path = project_relative_path(Path::new(&item.public.relative_cwd));
         let entry = grouped
             .entry(relative_path.clone())
@@ -801,6 +826,11 @@ fn merge_conversations(
                     existing.sync_status = "synced".to_string();
                     existing.handoff_id = Some(handoff.id.clone());
                     existing.source_device_name = handoff.source_device_name.clone();
+                    existing.source_device_os = if handoff.source_device_os.trim().is_empty() {
+                        existing.source_device_os.clone()
+                    } else {
+                        handoff.source_device_os.clone()
+                    };
                     existing.archive_path = if session.archive_path.is_empty() {
                         existing.archive_path.clone()
                     } else {
@@ -812,21 +842,26 @@ fn merge_conversations(
                 continue;
             }
             let relative_cwd = session.relative_cwd.replace('\\', "/");
-            let project = project_by_path
-                .iter()
-                .filter(|(path, _)| {
-                    relative_cwd.to_lowercase() == *path
-                        || relative_cwd.to_lowercase().starts_with(&format!("{path}/"))
-                })
-                .max_by_key(|(path, _)| path.len())
-                .map(|(_, name)| name.clone())
-                .or_else(|| {
-                    Path::new(&relative_cwd)
-                        .components()
-                        .next()
-                        .map(|value| value.as_os_str().to_string_lossy().to_string())
-                })
-                .unwrap_or_else(|| manifest.root_name.clone());
+            let unassigned = relative_cwd == "__unassigned__";
+            let project = if unassigned {
+                "无项目会话".to_string()
+            } else {
+                project_by_path
+                    .iter()
+                    .filter(|(path, _)| {
+                        relative_cwd.to_lowercase() == *path
+                            || relative_cwd.to_lowercase().starts_with(&format!("{path}/"))
+                    })
+                    .max_by_key(|(path, _)| path.len())
+                    .map(|(_, name)| name.clone())
+                    .or_else(|| {
+                        Path::new(&relative_cwd)
+                            .components()
+                            .next()
+                            .map(|value| value.as_os_str().to_string_lossy().to_string())
+                    })
+                    .unwrap_or_else(|| manifest.root_name.clone())
+            };
             let title = if session.thread_name.trim().is_empty() {
                 format!("Codex 会话 {}", &session.id[..session.id.len().min(8)])
             } else {
@@ -842,7 +877,7 @@ fn merge_conversations(
                     relative_cwd,
                     updated_at: session.modified_at.clone(),
                     source_device_name: handoff.source_device_name.clone(),
-                    source_device_os: "Windows".to_string(),
+                    source_device_os: handoff.source_device_os.clone(),
                     current_device: handoff
                         .source_device_name
                         .eq_ignore_ascii_case(&settings.device_name),
@@ -862,6 +897,8 @@ fn merge_conversations(
                     } else {
                         Some(session.archive_path.clone())
                     },
+                    workspace_path: None,
+                    unassigned,
                 },
             );
         }
@@ -1089,6 +1126,7 @@ fn temp_core_config(settings: &SettingsFile) -> Result<tempfile::NamedTempFile, 
                 "days": settings.sync_days,
                 "projectPaths": settings.selected_projects,
                 "includeArchived": settings.include_archived,
+                "includeUnassigned": settings.include_unassigned,
                 "maxBundleMiB": settings.max_bundle_mib
             }
         }),
@@ -1337,6 +1375,7 @@ async fn save_settings(
     current.sync_days = request.sync_days;
     current.selected_projects = selected_projects;
     current.include_archived = request.include_archived;
+    current.include_unassigned = request.include_unassigned;
     current.max_bundle_mib = request.max_bundle_mib;
     write_settings_file(&app, &current)?;
     if current.launch_at_startup {
@@ -1427,7 +1466,17 @@ async fn continue_conversation(
         .find(|item| item.id == conversation_id)
         .ok_or_else(|| "找不到这条会话，请刷新后重试".to_string())?;
     let settings = load_settings_file(&app)?;
-    let workspace = PathBuf::from(&settings.root).join(&conversation.relative_cwd);
+    let workspace = conversation
+        .workspace_path
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            if conversation.unassigned {
+                PathBuf::from(&settings.root)
+            } else {
+                PathBuf::from(&settings.root).join(&conversation.relative_cwd)
+            }
+        });
     if conversation.local {
         return Ok(ContinueResult {
             ok: true,
@@ -1540,6 +1589,120 @@ async fn import_archive(app: AppHandle, input: String) -> Result<ArchiveResult, 
     })
 }
 
+fn server_origin(value: &str) -> String {
+    let Some((scheme, remainder)) = value.trim().split_once("://") else {
+        return "未配置".to_string();
+    };
+    let authority = remainder
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or_default()
+        .rsplit('@')
+        .next()
+        .unwrap_or_default();
+    if authority.is_empty() {
+        "未配置".to_string()
+    } else {
+        format!("{scheme}://{authority}")
+    }
+}
+
+#[tauri::command]
+async fn export_diagnostics(app: AppHandle, output: String) -> Result<ArchiveResult, String> {
+    let output = PathBuf::from(output);
+    if output.exists() {
+        return Err("目标文件已存在，请选择新的文件名".to_string());
+    }
+    if let Some(parent) = output.parent() {
+        fs::create_dir_all(parent).map_err(|error| format!("创建诊断报告目录失败：{error}"))?;
+    }
+    let settings = load_settings_file(&app)?;
+    let snapshot = dashboard_data(&app).await?;
+    let local_count = snapshot
+        .conversations
+        .iter()
+        .filter(|conversation| conversation.local)
+        .count();
+    let remote_count = snapshot.conversations.len().saturating_sub(local_count);
+    let archived_count = snapshot
+        .conversations
+        .iter()
+        .filter(|conversation| conversation.archived)
+        .count();
+    let unassigned_count = snapshot
+        .conversations
+        .iter()
+        .filter(|conversation| conversation.unassigned)
+        .count();
+    let payload = json!({
+        "schemaVersion": 1,
+        "generatedAt": now_iso(),
+        "privacy": {
+            "containsCredentials": false,
+            "containsEncryptionKey": false,
+            "containsConversationContent": false,
+            "containsConversationTitles": false,
+            "containsWorkspacePaths": false
+        },
+        "application": {
+            "name": "Codex Continuity",
+            "version": APP_VERSION,
+            "platform": std::env::consts::OS,
+            "architecture": std::env::consts::ARCH
+        },
+        "configuration": {
+            "configured": snapshot.configured,
+            "serverOrigin": server_origin(&settings.server_url),
+            "autoSync": settings.auto_sync,
+            "launchAtStartup": settings.launch_at_startup,
+            "syncDays": settings.sync_days,
+            "selectedProjectCount": settings.selected_projects.len(),
+            "includeArchived": settings.include_archived,
+            "includeUnassigned": settings.include_unassigned,
+            "maxBundleMiB": settings.max_bundle_mib
+        },
+        "connection": snapshot.connection.as_ref().map(|connection| json!({
+            "ok": connection.ok,
+            "latencyMs": connection.latency_ms,
+            "service": connection.service,
+            "checkedAt": connection.checked_at
+        })),
+        "sync": {
+            "phase": snapshot.sync.phase,
+            "lastSuccessAt": snapshot.sync.last_success_at,
+            "lastAttemptAt": snapshot.sync.last_attempt_at,
+            "nextSyncAt": snapshot.sync.next_sync_at,
+            "lastErrorPresent": snapshot.sync.last_error.as_ref().is_some_and(|value| !value.trim().is_empty()),
+            "pendingUploads": snapshot.sync.pending_uploads,
+            "scannedConversations": snapshot.sync.scanned_conversations
+        },
+        "counts": {
+            "visibleConversations": snapshot.conversations.len(),
+            "localConversations": local_count,
+            "remoteConversations": remote_count,
+            "archivedConversations": archived_count,
+            "unassignedConversations": unassigned_count,
+            "availableProjects": snapshot.sync_projects.len()
+        }
+    });
+    let raw = serde_json::to_vec_pretty(&payload)
+        .map_err(|error| format!("生成诊断报告失败：{error}"))?;
+    let mut file = fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&output)
+        .map_err(|error| format!("创建诊断报告失败：{error}"))?;
+    file.write_all(&raw)
+        .map_err(|error| format!("写入诊断报告失败：{error}"))?;
+    file.flush()
+        .map_err(|error| format!("写入诊断报告失败：{error}"))?;
+    Ok(ArchiveResult {
+        ok: true,
+        message: "脱敏诊断报告已导出，不包含凭据、密钥、路径或会话内容".to_string(),
+        path: Some(output.to_string_lossy().to_string()),
+    })
+}
+
 #[tauri::command]
 fn set_auto_sync(app: AppHandle, enabled: bool) -> Result<PublicSettings, String> {
     let mut settings = load_settings_file(&app)?;
@@ -1621,6 +1784,27 @@ fn start_background_sync(app: &tauri::App) {
     });
 }
 
+fn clamp_main_window_to_monitor(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let Ok(Some(monitor)) = window.current_monitor() else {
+        return;
+    };
+    let Ok(current) = window.outer_size() else {
+        return;
+    };
+    let monitor_size = monitor.size();
+    let max_width = (monitor_size.width as f64 * 0.92).round() as u32;
+    let max_height = (monitor_size.height as f64 * 0.86).round() as u32;
+    let width = current.width.min(max_width);
+    let height = current.height.min(max_height);
+    if width != current.width || height != current.height {
+        let _ = window.set_size(Size::Physical(PhysicalSize::new(width, height)));
+        let _ = window.center();
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1693,6 +1877,7 @@ pub fn run() {
                     _ => {}
                 })
                 .build(app)?;
+            clamp_main_window_to_monitor(app.handle());
             start_background_sync(app);
             if std::env::args().any(|argument| argument == "--background") {
                 if let Some(window) = app.get_webview_window("main") {
@@ -1721,6 +1906,7 @@ pub fn run() {
             continue_conversation,
             export_archive,
             import_archive,
+            export_diagnostics,
             set_auto_sync,
             set_theme,
             show_main_window,
@@ -1757,5 +1943,14 @@ mod tests {
     fn parses_server_timestamps() {
         assert!(parse_time("2026-07-27T10:20:30Z") > 0);
         assert_eq!(parse_time("invalid"), 0);
+    }
+
+    #[test]
+    fn strips_credentials_paths_and_queries_from_diagnostic_server_origin() {
+        assert_eq!(
+            server_origin("https://user:secret@continuity.example.com:8443/api?token=secret"),
+            "https://continuity.example.com:8443"
+        );
+        assert_eq!(server_origin("not-a-url"), "未配置");
     }
 }

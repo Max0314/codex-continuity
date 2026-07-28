@@ -27,10 +27,11 @@ const (
 )
 
 type SyncScope struct {
-	Days            int      `json:"days"`
-	ProjectPaths    []string `json:"projectPaths,omitempty"`
-	IncludeArchived bool     `json:"includeArchived"`
-	MaxBundleMiB    int      `json:"maxBundleMiB"`
+	Days              int      `json:"days"`
+	ProjectPaths      []string `json:"projectPaths,omitempty"`
+	IncludeArchived   bool     `json:"includeArchived"`
+	IncludeUnassigned bool     `json:"includeUnassigned"`
+	MaxBundleMiB      int      `json:"maxBundleMiB"`
 }
 
 func DefaultSyncScope() SyncScope {
@@ -42,7 +43,8 @@ func DefaultSyncScope() SyncScope {
 
 func (c Config) EffectiveSyncScope() SyncScope {
 	scope := c.SyncScope
-	if scope.Days == 0 && scope.MaxBundleMiB == 0 && len(scope.ProjectPaths) == 0 && !scope.IncludeArchived {
+	if scope.Days == 0 && scope.MaxBundleMiB == 0 && len(scope.ProjectPaths) == 0 &&
+		!scope.IncludeArchived && !scope.IncludeUnassigned {
 		return DefaultSyncScope()
 	}
 	if scope.MaxBundleMiB == 0 {

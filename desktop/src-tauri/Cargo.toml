@@ -1,6 +1,6 @@
 [package]
 name = "codex-continuity-desktop"
-version = "0.3.1"
+version = "0.3.2"
 description = "Codex Continuity Windows desktop client"
 authors = ["Codex Continuity Contributors"]
 edition = "2021"
