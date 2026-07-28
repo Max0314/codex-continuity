@@ -1,6 +1,6 @@
 [package]
 name = "codex-continuity-desktop"
-version = "0.3.2"
+version = "0.4.0"
 description = "Codex Continuity Windows desktop client"
 authors = ["Codex Continuity Contributors"]
 edition = "2021"
@@ -19,6 +19,7 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 aes-gcm = "0.10"
+argon2 = "0.5"
 base64 = "0.22"
 chrono = "0.4"
 dirs = "6"

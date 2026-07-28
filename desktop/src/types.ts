@@ -26,8 +26,6 @@ export interface SaveSettingsRequest {
   serverUrl: string
   root: string
   deviceName: string
-  token?: string
-  encryptionKey?: string
   autoSync: boolean
   launchAtStartup: boolean
   theme: ThemeName
@@ -36,6 +34,35 @@ export interface SaveSettingsRequest {
   includeArchived: boolean
   includeUnassigned: boolean
   maxBundleMiB: number
+}
+
+export interface AuthStatus {
+  authenticated: boolean
+  username: string
+  displayName: string
+  serverUrl: string
+  legacyAccountAvailable: boolean
+  transportSecure: boolean
+}
+
+export interface LoginAccountRequest {
+  serverUrl: string
+  username: string
+  password: string
+}
+
+export interface RegisterAccountRequest extends LoginAccountRequest {
+  displayName: string
+}
+
+export interface RecoverAccountRequest extends LoginAccountRequest {
+  recoveryKey: string
+}
+
+export interface AuthActionResult {
+  status: AuthStatus
+  message: string
+  recoveryKey?: string
 }
 
 export interface ConnectionResult {

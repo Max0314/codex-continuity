@@ -2,11 +2,16 @@ import { invoke } from '@tauri-apps/api/core'
 import type {
   ActionResult,
   ArchiveResult,
+  AuthActionResult,
+  AuthStatus,
   ConnectionResult,
   ContinueResult,
   Conversation,
   DashboardSnapshot,
   PublicSettings,
+  LoginAccountRequest,
+  RegisterAccountRequest,
+  RecoverAccountRequest,
   SaveSettingsRequest,
   UploadTestResult,
 } from './types'
@@ -15,10 +20,10 @@ const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 const now = () => new Date().toISOString()
 
 let currentSettings: PublicSettings = {
-  serverUrl: 'http://127.0.0.1:18787',
+  serverUrl: 'http://1.14.72.50:24001',
   root: 'D:\\code_CPL',
   deviceName: '公司电脑',
-  deviceId: 'device-company',
+  deviceId: 'mac_demo',
   autoSync: true,
   launchAtStartup: true,
   theme: 'blue',
@@ -29,7 +34,16 @@ let currentSettings: PublicSettings = {
   maxBundleMiB: 500,
   hasToken: true,
   hasEncryptionKey: true,
-  version: '0.3.2',
+  version: '0.4.0',
+}
+
+let mockAuthStatus: AuthStatus = {
+  authenticated: false,
+  username: '',
+  displayName: '',
+  serverUrl: currentSettings.serverUrl,
+  legacyAccountAvailable: true,
+  transportSecure: false,
 }
 
 const mockConversations: Conversation[] = [
@@ -239,6 +253,68 @@ async function chooseDiagnosticReport() {
 }
 
 export const desktopApi = {
+  authStatus: () =>
+    isTauri ? invoke<AuthStatus>('get_auth_status') : mockDelay(mockAuthStatus, 180),
+
+  registerAccount: (request: RegisterAccountRequest) =>
+    isTauri
+      ? invoke<AuthActionResult>('register_account', { request })
+      : mockDelay({
+          status: (mockAuthStatus = {
+            authenticated: true,
+            username: request.username.toLowerCase(),
+            displayName: request.displayName || request.username,
+            serverUrl: request.serverUrl,
+            legacyAccountAvailable: false,
+            transportSecure: request.serverUrl.startsWith('https://'),
+          }),
+          message: '现有同步数据已安全关联到新账号',
+          recoveryKey: 'hQPXbJcMT6mtIpboRjhHhfGuJs6ssSeQSdTeD1T0aZE',
+        }, 680),
+
+  loginAccount: (request: LoginAccountRequest) =>
+    isTauri
+      ? invoke<AuthActionResult>('login_account', { request })
+      : mockDelay({
+          status: (mockAuthStatus = {
+            authenticated: true,
+            username: request.username.toLowerCase(),
+            displayName: request.username,
+            serverUrl: request.serverUrl,
+            legacyAccountAvailable: false,
+            transportSecure: request.serverUrl.startsWith('https://'),
+          }),
+          message: '账号已登录，本机同步密钥已自动解锁',
+          recoveryKey: undefined,
+        }, 620),
+
+  recoverAccount: (request: RecoverAccountRequest) =>
+    isTauri
+      ? invoke<AuthActionResult>('recover_account', { request })
+      : mockDelay({
+          status: (mockAuthStatus = {
+            authenticated: true,
+            username: request.username.toLowerCase(),
+            displayName: request.username,
+            serverUrl: request.serverUrl,
+            legacyAccountAvailable: false,
+            transportSecure: request.serverUrl.startsWith('https://'),
+          }),
+          message: '密码已重置，其他设备上的旧登录会话已失效',
+          recoveryKey: undefined,
+        }, 680),
+
+  logoutAccount: async () => {
+    if (isTauri) return invoke<ActionResult>('logout_account')
+    mockAuthStatus = { ...mockAuthStatus, authenticated: false, username: '', displayName: '' }
+    return mockDelay({ ok: true, message: '已退出账号' }, 240)
+  },
+
+  recoveryKey: () =>
+    isTauri
+      ? invoke<string>('get_recovery_key')
+      : mockDelay('hQPXbJcMT6mtIpboRjhHhfGuJs6ssSeQSdTeD1T0aZE', 180),
+
   dashboard: () =>
     isTauri ? invoke<DashboardSnapshot>('get_dashboard') : mockDelay({ ...mockSnapshot, settings: currentSettings }),
 
@@ -249,12 +325,7 @@ export const desktopApi = {
           settings: (currentSettings = {
             ...currentSettings,
             ...request,
-            hasToken: Boolean(request.token) || currentSettings.hasToken,
-            hasEncryptionKey: Boolean(request.encryptionKey) || currentSettings.hasEncryptionKey,
           }),
-          generatedKey: request.encryptionKey || currentSettings.hasEncryptionKey
-            ? undefined
-            : 'hQPXbJcMT6mtIpboRjhHhfGuJs6ssSeQSdTeD1T0aZE',
           connection: { ok: true, latencyMs: 36, service: 'codex-continuity', checkedAt: now() },
         }),
 

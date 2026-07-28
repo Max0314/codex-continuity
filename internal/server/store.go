@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,6 +26,32 @@ type Store struct {
 type authenticatedUser struct {
 	model.User
 	PasswordHash string
+	KeySalt      string
+	WrappedKey   string
+}
+
+type ClientAuthSession struct {
+	AccessToken      string
+	RefreshToken     string
+	AccessExpiresAt  time.Time
+	RefreshExpiresAt time.Time
+}
+
+type ClientAccount struct {
+	User       model.User
+	KeySalt    string
+	WrappedKey string
+	Session    ClientAuthSession
+}
+
+type RegisterAccountParams struct {
+	Username        string
+	DisplayName     string
+	Password        string
+	KeySalt         string
+	WrappedKey      string
+	RecoveryKeyHash string
+	LegacyToken     string
 }
 
 func OpenStore(cfg Config) (*Store, error) {
@@ -61,9 +88,13 @@ func (s *Store) migrate() error {
 	const schema = `
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
+  username TEXT NOT NULL DEFAULT '',
   email TEXT NOT NULL UNIQUE COLLATE NOCASE,
   display_name TEXT NOT NULL,
   password_hash TEXT NOT NULL,
+  key_salt TEXT NOT NULL DEFAULT '',
+  wrapped_key TEXT NOT NULL DEFAULT '',
+  recovery_key_hash TEXT NOT NULL DEFAULT '',
   role TEXT NOT NULL CHECK(role IN ('admin','member')),
   created_at TEXT NOT NULL
 );
@@ -74,6 +105,17 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+CREATE TABLE IF NOT EXISTS client_sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  access_hash TEXT NOT NULL UNIQUE,
+  refresh_hash TEXT NOT NULL UNIQUE,
+  access_expires_at TEXT NOT NULL,
+  refresh_expires_at TEXT NOT NULL,
+  last_used_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_client_sessions_user ON client_sessions(user_id);
 CREATE TABLE IF NOT EXISTS api_tokens (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -115,7 +157,51 @@ CREATE INDEX IF NOT EXISTS idx_handoffs_user_created ON handoffs(user_id, create
 	if _, err := s.db.Exec(schema); err != nil {
 		return fmt.Errorf("migrate sqlite: %w", err)
 	}
+	for _, column := range []struct {
+		table      string
+		name       string
+		definition string
+	}{
+		{"users", "username", "TEXT NOT NULL DEFAULT ''"},
+		{"users", "key_salt", "TEXT NOT NULL DEFAULT ''"},
+		{"users", "wrapped_key", "TEXT NOT NULL DEFAULT ''"},
+		{"users", "recovery_key_hash", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := s.ensureColumn(column.table, column.name, column.definition); err != nil {
+			return fmt.Errorf("migrate sqlite column %s.%s: %w", column.table, column.name, err)
+		}
+	}
+	if _, err := s.db.Exec(`
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username
+ON users(username COLLATE NOCASE) WHERE username<>''`); err != nil {
+		return fmt.Errorf("migrate username index: %w", err)
+	}
 	return nil
+}
+
+func (s *Store) ensureColumn(table, name, definition string) error {
+	rows, err := s.db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var columnName, columnType string
+		var notNull, primaryKey int
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		if strings.EqualFold(columnName, name) {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = s.db.Exec("ALTER TABLE " + table + " ADD COLUMN " + name + " " + definition)
+	return err
 }
 
 func (s *Store) bootstrapAdmin(cfg Config) error {
@@ -131,16 +217,17 @@ func (s *Store) bootstrapAdmin(cfg Config) error {
 		return err
 	}
 	_, err = s.db.Exec(
-		"INSERT INTO users(id,email,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?,?)",
-		newID(), cfg.AdminEmail, cfg.AdminName, passwordHash, model.RoleAdmin, nowText(),
+		"INSERT INTO users(id,username,email,display_name,password_hash,key_salt,wrapped_key,recovery_key_hash,role,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+		newID(), "", cfg.AdminEmail, cfg.AdminName, passwordHash, "", "", "", model.RoleAdmin, nowText(),
 	)
 	return err
 }
 
-func (s *Store) Authenticate(email, password string) (model.User, error) {
+func (s *Store) Authenticate(identifier, password string) (model.User, error) {
+	identifier = strings.ToLower(strings.TrimSpace(identifier))
 	row := s.db.QueryRow(`
-SELECT id,email,display_name,password_hash,role,created_at
-FROM users WHERE email=?`, strings.ToLower(strings.TrimSpace(email)))
+SELECT id,username,email,display_name,password_hash,key_salt,wrapped_key,role,created_at
+FROM users WHERE email=? OR username=?`, identifier, identifier)
 	user, err := scanAuthenticatedUser(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -152,6 +239,220 @@ FROM users WHERE email=?`, strings.ToLower(strings.TrimSpace(email)))
 		return model.User{}, ErrNotFound
 	}
 	return user.User, nil
+}
+
+func (s *Store) AuthenticateClient(
+	identifier, password string,
+	accessTTL, refreshTTL time.Duration,
+) (ClientAccount, error) {
+	identifier = strings.ToLower(strings.TrimSpace(identifier))
+	row := s.db.QueryRow(`
+SELECT id,username,email,display_name,password_hash,key_salt,wrapped_key,role,created_at
+FROM users WHERE email=? OR username=?`, identifier, identifier)
+	user, err := scanAuthenticatedUser(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ClientAccount{}, ErrNotFound
+		}
+		return ClientAccount{}, err
+	}
+	if !checkPassword(user.PasswordHash, password) {
+		return ClientAccount{}, ErrNotFound
+	}
+	if user.KeySalt == "" || user.WrappedKey == "" {
+		return ClientAccount{}, fmt.Errorf("该账号尚未启用客户端登录，请在原设备选择“注册账号”完成升级")
+	}
+	session, err := s.CreateClientSession(user.ID, accessTTL, refreshTTL)
+	if err != nil {
+		return ClientAccount{}, err
+	}
+	return ClientAccount{
+		User:       user.User,
+		KeySalt:    user.KeySalt,
+		WrappedKey: user.WrappedKey,
+		Session:    session,
+	}, nil
+}
+
+func (s *Store) RegisterAccount(
+	params RegisterAccountParams,
+	accessTTL, refreshTTL time.Duration,
+) (ClientAccount, error) {
+	username, err := normalizeUsername(params.Username)
+	if err != nil {
+		return ClientAccount{}, err
+	}
+	displayName := strings.TrimSpace(params.DisplayName)
+	if displayName == "" {
+		displayName = username
+	}
+	if len(params.Password) < 10 {
+		return ClientAccount{}, fmt.Errorf("密码至少 10 位")
+	}
+	if strings.TrimSpace(params.KeySalt) == "" || strings.TrimSpace(params.WrappedKey) == "" {
+		return ClientAccount{}, fmt.Errorf("账号加密密钥无效")
+	}
+	recoveryKeyHash := strings.ToLower(strings.TrimSpace(params.RecoveryKeyHash))
+	if len(recoveryKeyHash) != 64 {
+		return ClientAccount{}, fmt.Errorf("恢复密钥摘要无效")
+	}
+	if _, err := hex.DecodeString(recoveryKeyHash); err != nil {
+		return ClientAccount{}, fmt.Errorf("恢复密钥摘要无效")
+	}
+	passwordHash, err := hashPassword(params.Password)
+	if err != nil {
+		return ClientAccount{}, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return ClientAccount{}, err
+	}
+	defer tx.Rollback()
+
+	var user model.User
+	if legacyToken := strings.TrimSpace(params.LegacyToken); legacyToken != "" {
+		var created, existingUsername string
+		err = tx.QueryRow(`
+SELECT u.id,u.username,u.email,u.display_name,u.role,u.created_at
+FROM api_tokens t JOIN users u ON u.id=t.user_id
+WHERE t.token_hash=?`, tokenDigest(legacyToken)).
+			Scan(&user.ID, &existingUsername, &user.Email, &user.DisplayName, &user.Role, &created)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ClientAccount{}, fmt.Errorf("现有客户端令牌无效，无法关联原账号")
+			}
+			return ClientAccount{}, err
+		}
+		if existingUsername != "" && !strings.EqualFold(existingUsername, username) {
+			return ClientAccount{}, fmt.Errorf("现有账号已经绑定用户名 %s", existingUsername)
+		}
+		user.Username = username
+		user.DisplayName = displayName
+		user.CreatedAt = parseTime(created)
+		_, err = tx.Exec(`
+UPDATE users
+SET username=?,display_name=?,password_hash=?,key_salt=?,wrapped_key=?,recovery_key_hash=?
+WHERE id=?`,
+			user.Username, user.DisplayName, passwordHash,
+			strings.TrimSpace(params.KeySalt), strings.TrimSpace(params.WrappedKey),
+			recoveryKeyHash, user.ID,
+		)
+		if err == nil {
+			_, err = tx.Exec("DELETE FROM api_tokens WHERE user_id=?", user.ID)
+		}
+	} else {
+		user = model.User{
+			ID:          newID(),
+			Username:    username,
+			Email:       username + "@users.continuity.local",
+			DisplayName: displayName,
+			Role:        model.RoleMember,
+			CreatedAt:   time.Now().UTC(),
+		}
+		_, err = tx.Exec(`
+INSERT INTO users(
+ id,username,email,display_name,password_hash,key_salt,wrapped_key,recovery_key_hash,role,created_at
+) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+			user.ID, user.Username, user.Email, user.DisplayName, passwordHash,
+			strings.TrimSpace(params.KeySalt), strings.TrimSpace(params.WrappedKey),
+			recoveryKeyHash, user.Role, user.CreatedAt.Format(time.RFC3339Nano),
+		)
+	}
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			return ClientAccount{}, fmt.Errorf("用户名已存在")
+		}
+		return ClientAccount{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ClientAccount{}, err
+	}
+	session, err := s.CreateClientSession(user.ID, accessTTL, refreshTTL)
+	if err != nil {
+		return ClientAccount{}, err
+	}
+	return ClientAccount{
+		User:       user,
+		KeySalt:    strings.TrimSpace(params.KeySalt),
+		WrappedKey: strings.TrimSpace(params.WrappedKey),
+		Session:    session,
+	}, nil
+}
+
+func (s *Store) RecoverAccount(
+	username, password, recoveryKeyHash, keySalt, wrappedKey string,
+	accessTTL, refreshTTL time.Duration,
+) (ClientAccount, error) {
+	normalizedUsername, err := normalizeUsername(username)
+	if err != nil {
+		return ClientAccount{}, err
+	}
+	if len(password) < 10 {
+		return ClientAccount{}, fmt.Errorf("密码至少 10 位")
+	}
+	recoveryKeyHash = strings.ToLower(strings.TrimSpace(recoveryKeyHash))
+	if len(recoveryKeyHash) != 64 {
+		return ClientAccount{}, ErrNotFound
+	}
+	if _, err := hex.DecodeString(recoveryKeyHash); err != nil {
+		return ClientAccount{}, ErrNotFound
+	}
+	keySalt = strings.TrimSpace(keySalt)
+	wrappedKey = strings.TrimSpace(wrappedKey)
+	if keySalt == "" || wrappedKey == "" {
+		return ClientAccount{}, fmt.Errorf("账户加密密钥无效")
+	}
+	passwordHash, err := hashPassword(password)
+	if err != nil {
+		return ClientAccount{}, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return ClientAccount{}, err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`
+UPDATE users
+SET password_hash=?,key_salt=?,wrapped_key=?
+WHERE username=? COLLATE NOCASE AND recovery_key_hash=?`,
+		passwordHash, keySalt, wrappedKey, normalizedUsername, recoveryKeyHash,
+	)
+	if err != nil {
+		return ClientAccount{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return ClientAccount{}, err
+	}
+	if affected != 1 {
+		return ClientAccount{}, ErrNotFound
+	}
+	row := tx.QueryRow(`
+SELECT id,username,email,display_name,password_hash,key_salt,wrapped_key,role,created_at
+FROM users WHERE username=? COLLATE NOCASE`, normalizedUsername)
+	user, err := scanAuthenticatedUser(row)
+	if err != nil {
+		return ClientAccount{}, err
+	}
+	if _, err := tx.Exec("DELETE FROM client_sessions WHERE user_id=?", user.ID); err != nil {
+		return ClientAccount{}, err
+	}
+	if _, err := tx.Exec("DELETE FROM api_tokens WHERE user_id=?", user.ID); err != nil {
+		return ClientAccount{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ClientAccount{}, err
+	}
+	session, err := s.CreateClientSession(user.ID, accessTTL, refreshTTL)
+	if err != nil {
+		return ClientAccount{}, err
+	}
+	return ClientAccount{
+		User:       user.User,
+		KeySalt:    keySalt,
+		WrappedKey: wrappedKey,
+		Session:    session,
+	}, nil
 }
 
 func (s *Store) CreateSession(userID string, ttl time.Duration) (string, error) {
@@ -169,7 +470,7 @@ func (s *Store) CreateSession(userID string, ttl time.Duration) (string, error) 
 
 func (s *Store) UserBySession(token string) (model.User, error) {
 	row := s.db.QueryRow(`
-SELECT u.id,u.email,u.display_name,u.role,u.created_at
+SELECT u.id,u.username,u.email,u.display_name,u.role,u.created_at
 FROM sessions s JOIN users u ON u.id=s.user_id
 WHERE s.token_hash=? AND s.expires_at>?`, tokenDigest(token), nowText())
 	return scanUser(row)
@@ -180,10 +481,129 @@ func (s *Store) DeleteSession(token string) error {
 	return err
 }
 
+func (s *Store) CreateClientSession(
+	userID string,
+	accessTTL, refreshTTL time.Duration,
+) (ClientAuthSession, error) {
+	access, accessHash, err := randomToken("ca_", 32)
+	if err != nil {
+		return ClientAuthSession{}, err
+	}
+	refresh, refreshHash, err := randomToken("cr_", 48)
+	if err != nil {
+		return ClientAuthSession{}, err
+	}
+	now := time.Now().UTC()
+	session := ClientAuthSession{
+		AccessToken:      access,
+		RefreshToken:     refresh,
+		AccessExpiresAt:  now.Add(accessTTL),
+		RefreshExpiresAt: now.Add(refreshTTL),
+	}
+	_, err = s.db.Exec(`
+INSERT INTO client_sessions(
+ id,user_id,access_hash,refresh_hash,access_expires_at,refresh_expires_at,last_used_at,created_at
+) VALUES(?,?,?,?,?,?,?,?)`,
+		newID(), userID, accessHash, refreshHash,
+		session.AccessExpiresAt.Format(time.RFC3339Nano),
+		session.RefreshExpiresAt.Format(time.RFC3339Nano),
+		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+	)
+	return session, err
+}
+
+func (s *Store) UserByClientAccessToken(token string) (model.User, error) {
+	digest := tokenDigest(token)
+	row := s.db.QueryRow(`
+SELECT u.id,u.username,u.email,u.display_name,u.role,u.created_at
+FROM client_sessions s JOIN users u ON u.id=s.user_id
+WHERE s.access_hash=? AND s.access_expires_at>?`, digest, nowText())
+	user, err := scanUser(row)
+	if err != nil {
+		return model.User{}, err
+	}
+	_, _ = s.db.Exec(
+		"UPDATE client_sessions SET last_used_at=? WHERE access_hash=?",
+		nowText(), digest,
+	)
+	return user, nil
+}
+
+func (s *Store) RefreshClientSession(
+	refreshToken string,
+	accessTTL, refreshTTL time.Duration,
+) (ClientAccount, error) {
+	refreshHash := tokenDigest(refreshToken)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return ClientAccount{}, err
+	}
+	defer tx.Rollback()
+	row := tx.QueryRow(`
+SELECT u.id,u.username,u.email,u.display_name,u.role,u.created_at,u.key_salt,u.wrapped_key
+FROM client_sessions s JOIN users u ON u.id=s.user_id
+WHERE s.refresh_hash=? AND s.refresh_expires_at>?`, refreshHash, nowText())
+	var account ClientAccount
+	var created string
+	if err := row.Scan(
+		&account.User.ID, &account.User.Username, &account.User.Email,
+		&account.User.DisplayName, &account.User.Role, &created,
+		&account.KeySalt, &account.WrappedKey,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ClientAccount{}, ErrNotFound
+		}
+		return ClientAccount{}, err
+	}
+	account.User.CreatedAt = parseTime(created)
+	if _, err := tx.Exec("DELETE FROM client_sessions WHERE refresh_hash=?", refreshHash); err != nil {
+		return ClientAccount{}, err
+	}
+	access, accessHash, err := randomToken("ca_", 32)
+	if err != nil {
+		return ClientAccount{}, err
+	}
+	refresh, nextRefreshHash, err := randomToken("cr_", 48)
+	if err != nil {
+		return ClientAccount{}, err
+	}
+	now := time.Now().UTC()
+	account.Session = ClientAuthSession{
+		AccessToken:      access,
+		RefreshToken:     refresh,
+		AccessExpiresAt:  now.Add(accessTTL),
+		RefreshExpiresAt: now.Add(refreshTTL),
+	}
+	_, err = tx.Exec(`
+INSERT INTO client_sessions(
+ id,user_id,access_hash,refresh_hash,access_expires_at,refresh_expires_at,last_used_at,created_at
+) VALUES(?,?,?,?,?,?,?,?)`,
+		newID(), account.User.ID, accessHash, nextRefreshHash,
+		account.Session.AccessExpiresAt.Format(time.RFC3339Nano),
+		account.Session.RefreshExpiresAt.Format(time.RFC3339Nano),
+		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+	)
+	if err != nil {
+		return ClientAccount{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return ClientAccount{}, err
+	}
+	return account, nil
+}
+
+func (s *Store) DeleteClientSession(refreshToken string) error {
+	_, err := s.db.Exec(
+		"DELETE FROM client_sessions WHERE refresh_hash=?",
+		tokenDigest(refreshToken),
+	)
+	return err
+}
+
 func (s *Store) UserByAPIToken(token string) (model.User, error) {
 	digest := tokenDigest(token)
 	row := s.db.QueryRow(`
-SELECT u.id,u.email,u.display_name,u.role,u.created_at
+SELECT u.id,u.username,u.email,u.display_name,u.role,u.created_at
 FROM api_tokens t JOIN users u ON u.id=t.user_id
 WHERE t.token_hash=?`, digest)
 	user, err := scanUser(row)
@@ -195,7 +615,7 @@ WHERE t.token_hash=?`, digest)
 }
 
 func (s *Store) ListUsers() ([]model.User, error) {
-	rows, err := s.db.Query("SELECT id,email,display_name,role,created_at FROM users ORDER BY created_at")
+	rows, err := s.db.Query("SELECT id,username,email,display_name,role,created_at FROM users ORDER BY created_at")
 	if err != nil {
 		return nil, err
 	}
@@ -232,8 +652,8 @@ func (s *Store) CreateUser(email, displayName, password, role string) (model.Use
 		CreatedAt:   time.Now().UTC(),
 	}
 	_, err = s.db.Exec(
-		"INSERT INTO users(id,email,display_name,password_hash,role,created_at) VALUES(?,?,?,?,?,?)",
-		user.ID, user.Email, user.DisplayName, passwordHash, user.Role, user.CreatedAt.Format(time.RFC3339Nano),
+		"INSERT INTO users(id,username,email,display_name,password_hash,key_salt,wrapped_key,recovery_key_hash,role,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+		user.ID, "", user.Email, user.DisplayName, passwordHash, "", "", "", user.Role, user.CreatedAt.Format(time.RFC3339Nano),
 	)
 	return user, err
 }
@@ -299,9 +719,18 @@ func (s *Store) DeleteToken(userID, tokenID string) error {
 
 func (s *Store) UpsertDevice(userID string, device model.Device) (model.Device, error) {
 	now := time.Now().UTC()
-	var existingID, created string
-	err := s.db.QueryRow("SELECT id,created_at FROM devices WHERE user_id=? AND name=?", userID, device.Name).
-		Scan(&existingID, &created)
+	var existingID, existingUserID, created string
+	var err error
+	if device.ID != "" {
+		err = s.db.QueryRow("SELECT id,user_id,created_at FROM devices WHERE id=?", device.ID).
+			Scan(&existingID, &existingUserID, &created)
+		if err == nil && existingUserID != userID {
+			return model.Device{}, fmt.Errorf("设备身份已属于其他账号")
+		}
+	} else {
+		err = s.db.QueryRow("SELECT id,user_id,created_at FROM devices WHERE user_id=? AND name=?", userID, device.Name).
+			Scan(&existingID, &existingUserID, &created)
+	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return model.Device{}, err
 	}
@@ -310,8 +739,9 @@ func (s *Store) UpsertDevice(userID string, device model.Device) (model.Device, 
 		device.CreatedAt = parseTime(created)
 		device.LastSeenAt = now
 		_, err = s.db.Exec(`
-UPDATE devices SET hostname=?,os=?,client_version=?,last_seen_at=? WHERE id=?`,
-			device.Hostname, device.OS, device.ClientVersion, now.Format(time.RFC3339Nano), device.ID)
+UPDATE devices SET name=?,hostname=?,os=?,client_version=?,last_seen_at=? WHERE id=? AND user_id=?`,
+			device.Name, device.Hostname, device.OS, device.ClientVersion,
+			now.Format(time.RFC3339Nano), device.ID, userID)
 		return device, err
 	}
 	if device.ID == "" {
@@ -481,7 +911,10 @@ func (s *Store) Overview(userID string) (model.Overview, error) {
 func scanAuthenticatedUser(row interface{ Scan(...any) error }) (authenticatedUser, error) {
 	var u authenticatedUser
 	var created string
-	err := row.Scan(&u.ID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.Role, &created)
+	err := row.Scan(
+		&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.PasswordHash,
+		&u.KeySalt, &u.WrappedKey, &u.Role, &created,
+	)
 	u.CreatedAt = parseTime(created)
 	return u, err
 }
@@ -489,7 +922,7 @@ func scanAuthenticatedUser(row interface{ Scan(...any) error }) (authenticatedUs
 func scanUser(row interface{ Scan(...any) error }) (model.User, error) {
 	var u model.User
 	var created string
-	err := row.Scan(&u.ID, &u.Email, &u.DisplayName, &u.Role, &created)
+	err := row.Scan(&u.ID, &u.Username, &u.Email, &u.DisplayName, &u.Role, &created)
 	u.CreatedAt = parseTime(created)
 	return u, err
 }

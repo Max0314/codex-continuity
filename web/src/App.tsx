@@ -160,7 +160,7 @@ function Login({
   setTheme: (theme: ThemeName) => void
   onLogin: (user: User) => void
 }) {
-  const [email, setEmail] = useState('')
+  const [identifier, setIdentifier] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
   const [busy, setBusy] = useState(false)
@@ -170,7 +170,7 @@ function Login({
     setBusy(true)
     setError('')
     try {
-      const result = await api.login(email, password)
+      const result = await api.login(identifier, password)
       onLogin(result.user)
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : '登录失败')
@@ -222,12 +222,11 @@ function Login({
           <h2>登录管理空间</h2>
           <p className="form-intro">查看设备状态、会话快照与团队成员。</p>
           <label>
-            <span>邮箱</span>
+            <span>用户名或邮箱</span>
             <input
-              type="email"
-              value={email}
-              onChange={(event) => setEmail(event.target.value)}
-              placeholder="name@company.com"
+              value={identifier}
+              onChange={(event) => setIdentifier(event.target.value)}
+              placeholder="用户名或 name@company.com"
               autoComplete="username"
               required
             />
@@ -249,7 +248,7 @@ function Login({
             {!busy && <ChevronRight size={18} />}
           </button>
           <div className="login-help">
-            首次部署的管理员账号由服务端环境变量设置。请登录后立即创建个人令牌。
+            桌面客户端可直接注册同步账号；管理员仍可使用部署邮箱登录。
           </div>
         </form>
       </section>
@@ -321,7 +320,7 @@ function Header({
             <div className="account-popover">
               <div>
                 <strong>{user.displayName}</strong>
-                <small>{user.email}</small>
+                <small>{user.username ? `@${user.username}` : user.email}</small>
               </div>
               <button onClick={onLogout}>
                 <LogOut size={16} /> 退出登录
@@ -382,7 +381,7 @@ function Sidebar({
         </div>
         <div className="version-row">
           <span>版本</span>
-          <span>v0.3.2</span>
+          <span>v0.4.0</span>
         </div>
       </div>
     </aside>
@@ -554,7 +553,7 @@ function UsersPage({ currentUser }: { currentUser: User }) {
             <tbody>
               {items.map((member) => (
                 <tr key={member.id}>
-                  <td><div className="person-cell"><span className="avatar small">{member.displayName.slice(0, 1)}</span><div><strong>{member.displayName}{member.id === currentUser.id ? '（我）' : ''}</strong><small>{member.email}</small></div></div></td>
+                  <td><div className="person-cell"><span className="avatar small">{member.displayName.slice(0, 1)}</span><div><strong>{member.displayName}{member.id === currentUser.id ? '（我）' : ''}</strong><small>{member.username ? `@${member.username}` : member.email}</small></div></div></td>
                   <td>{member.role === 'admin' ? '管理员' : '成员'}</td>
                   <td>{formatDate(member.createdAt)}</td>
                   <td><span className="status-badge success"><i /> 正常</span></td>
@@ -734,7 +733,7 @@ function DownloadsPage() {
       .catch((error) => setReleaseError(error instanceof Error ? error.message : '安装包清单加载失败'))
   }, [])
 
-  const currentVersion = release?.version ?? '0.3.2'
+  const currentVersion = release?.version ?? '0.4.0'
   const currentCount = devices.filter((device) => device.clientVersion === currentVersion).length
   const outdatedCount = devices.filter((device) => device.clientVersion && device.clientVersion !== currentVersion).length
   const standardArtifact = release?.artifacts.find((artifact) => artifact.id === 'standard')

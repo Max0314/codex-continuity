@@ -2,6 +2,7 @@ export type Role = 'admin' | 'member'
 
 export interface User {
   id: string
+  username?: string
   email: string
   displayName: string
   role: Role

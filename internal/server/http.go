@@ -41,6 +41,11 @@ func NewHTTPServer(cfg Config, store *Store, logger *slog.Logger) http.Handler {
 
 	mux.HandleFunc("GET /api/v1/health", s.health)
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
+	mux.HandleFunc("POST /api/v1/client/auth/register", s.clientRegister)
+	mux.HandleFunc("POST /api/v1/client/auth/login", s.clientLogin)
+	mux.HandleFunc("POST /api/v1/client/auth/recover", s.clientRecover)
+	mux.HandleFunc("POST /api/v1/client/auth/refresh", s.clientRefresh)
+	mux.HandleFunc("POST /api/v1/client/auth/logout", s.clientLogout)
 	mux.Handle("POST /api/v1/auth/logout", s.withSession(http.HandlerFunc(s.logout)))
 	mux.Handle("GET /api/v1/me", s.withSession(http.HandlerFunc(s.me)))
 	mux.Handle("GET /api/v1/overview", s.withSession(http.HandlerFunc(s.overview)))
@@ -52,12 +57,12 @@ func NewHTTPServer(cfg Config, store *Store, logger *slog.Logger) http.Handler {
 	mux.Handle("GET /api/v1/users", s.withAdmin(http.HandlerFunc(s.users)))
 	mux.Handle("POST /api/v1/users", s.withAdmin(http.HandlerFunc(s.createUser)))
 
-	mux.Handle("POST /api/v1/client/devices", s.withAPIToken(http.HandlerFunc(s.registerDevice)))
-	mux.Handle("POST /api/v1/client/diagnostics/upload-test", s.withAPIToken(http.HandlerFunc(s.uploadTest)))
-	mux.Handle("GET /api/v1/client/handoffs", s.withAPIToken(http.HandlerFunc(s.clientHandoffs)))
-	mux.Handle("POST /api/v1/client/handoffs", s.withAPIToken(http.HandlerFunc(s.uploadHandoff)))
-	mux.Handle("GET /api/v1/client/handoffs/{id}/blob", s.withAPIToken(http.HandlerFunc(s.downloadHandoff)))
-	mux.Handle("POST /api/v1/client/handoffs/{id}/claim", s.withAPIToken(http.HandlerFunc(s.claimHandoff)))
+	mux.Handle("POST /api/v1/client/devices", s.withClientAuth(http.HandlerFunc(s.registerDevice)))
+	mux.Handle("POST /api/v1/client/diagnostics/upload-test", s.withClientAuth(http.HandlerFunc(s.uploadTest)))
+	mux.Handle("GET /api/v1/client/handoffs", s.withClientAuth(http.HandlerFunc(s.clientHandoffs)))
+	mux.Handle("POST /api/v1/client/handoffs", s.withClientAuth(http.HandlerFunc(s.uploadHandoff)))
+	mux.Handle("GET /api/v1/client/handoffs/{id}/blob", s.withClientAuth(http.HandlerFunc(s.downloadHandoff)))
+	mux.Handle("POST /api/v1/client/handoffs/{id}/claim", s.withClientAuth(http.HandlerFunc(s.claimHandoff)))
 
 	if info, err := os.Stat(cfg.DownloadDir); err == nil && info.IsDir() {
 		mux.Handle("/downloads/", http.StripPrefix("/downloads/", http.FileServer(http.Dir(cfg.DownloadDir))))
@@ -76,13 +81,18 @@ func (s *HTTPServer) health(w http.ResponseWriter, _ *http.Request) {
 
 func (s *HTTPServer) login(w http.ResponseWriter, r *http.Request) {
 	var input struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email      string `json:"email"`
+		Identifier string `json:"identifier"`
+		Password   string `json:"password"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	user, err := s.store.Authenticate(input.Email, input.Password)
+	identifier := strings.TrimSpace(input.Identifier)
+	if identifier == "" {
+		identifier = input.Email
+	}
+	user, err := s.store.Authenticate(identifier, input.Password)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "邮箱或密码不正确")
 		return
@@ -102,6 +112,148 @@ func (s *HTTPServer) login(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   int(s.cfg.SessionTTL.Seconds()),
 	})
 	writeJSON(w, http.StatusOK, map[string]any{"user": user})
+}
+
+func (s *HTTPServer) clientRegister(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Username        string `json:"username"`
+		DisplayName     string `json:"displayName"`
+		Password        string `json:"password"`
+		KeySalt         string `json:"keySalt"`
+		WrappedKey      string `json:"wrappedKey"`
+		RecoveryKeyHash string `json:"recoveryKeyHash"`
+		LegacyToken     string `json:"legacyToken"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	account, err := s.store.RegisterAccount(RegisterAccountParams{
+		Username:        input.Username,
+		DisplayName:     input.DisplayName,
+		Password:        input.Password,
+		KeySalt:         input.KeySalt,
+		WrappedKey:      input.WrappedKey,
+		RecoveryKeyHash: input.RecoveryKeyHash,
+		LegacyToken:     input.LegacyToken,
+	}, s.cfg.ClientAccessTTL, s.cfg.ClientRefreshTTL)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeClientAccount(w, r, http.StatusCreated, account)
+}
+
+func (s *HTTPServer) clientLogin(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	account, err := s.store.AuthenticateClient(
+		input.Username,
+		input.Password,
+		s.cfg.ClientAccessTTL,
+		s.cfg.ClientRefreshTTL,
+	)
+	if err != nil {
+		message := "用户名或密码不正确"
+		if !errors.Is(err, ErrNotFound) {
+			message = err.Error()
+		}
+		writeError(w, http.StatusUnauthorized, message)
+		return
+	}
+	writeClientAccount(w, r, http.StatusOK, account)
+}
+
+func (s *HTTPServer) clientRecover(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Username        string `json:"username"`
+		Password        string `json:"password"`
+		RecoveryKeyHash string `json:"recoveryKeyHash"`
+		KeySalt         string `json:"keySalt"`
+		WrappedKey      string `json:"wrappedKey"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	account, err := s.store.RecoverAccount(
+		input.Username,
+		input.Password,
+		input.RecoveryKeyHash,
+		input.KeySalt,
+		input.WrappedKey,
+		s.cfg.ClientAccessTTL,
+		s.cfg.ClientRefreshTTL,
+	)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			writeError(w, http.StatusUnauthorized, "用户名或恢复密钥不正确")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeClientAccount(w, r, http.StatusOK, account)
+}
+
+func (s *HTTPServer) clientRefresh(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		RefreshToken string `json:"refreshToken"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	account, err := s.store.RefreshClientSession(
+		input.RefreshToken,
+		s.cfg.ClientAccessTTL,
+		s.cfg.ClientRefreshTTL,
+	)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "登录已失效，请重新登录")
+		return
+	}
+	writeClientAccount(w, r, http.StatusOK, account)
+}
+
+func (s *HTTPServer) clientLogout(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		RefreshToken string `json:"refreshToken"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if input.RefreshToken != "" {
+		_ = s.store.DeleteClientSession(input.RefreshToken)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func writeClientAccount(
+	w http.ResponseWriter,
+	r *http.Request,
+	status int,
+	account ClientAccount,
+) {
+	writeJSON(w, status, map[string]any{
+		"user":             account.User,
+		"accessToken":      account.Session.AccessToken,
+		"refreshToken":     account.Session.RefreshToken,
+		"accessExpiresAt":  account.Session.AccessExpiresAt,
+		"refreshExpiresAt": account.Session.RefreshExpiresAt,
+		"keySalt":          account.KeySalt,
+		"wrappedKey":       account.WrappedKey,
+		"transportSecure":  requestIsSecure(r),
+	})
+}
+
+func requestIsSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(r.Header.Get("X-Forwarded-Proto")), "https")
 }
 
 func (s *HTTPServer) logout(w http.ResponseWriter, r *http.Request) {
@@ -462,14 +614,18 @@ func (s *HTTPServer) withAdmin(next http.Handler) http.Handler {
 	}))
 }
 
-func (s *HTTPServer) withAPIToken(next http.Handler) http.Handler {
+func (s *HTTPServer) withClientAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		header := r.Header.Get("Authorization")
 		if !strings.HasPrefix(header, "Bearer ") {
 			writeError(w, http.StatusUnauthorized, "缺少客户端令牌")
 			return
 		}
-		user, err := s.store.UserByAPIToken(strings.TrimSpace(strings.TrimPrefix(header, "Bearer ")))
+		token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
+		user, err := s.store.UserByClientAccessToken(token)
+		if err != nil {
+			user, err = s.store.UserByAPIToken(token)
+		}
 		if err != nil {
 			writeError(w, http.StatusUnauthorized, "客户端令牌无效")
 			return

@@ -99,18 +99,22 @@ docker compose up -d --no-build --force-recreate
 
 如果服务器不便公开暴露，可以使用 Tailscale、WireGuard 或公司 VPN。不要把 8787 端口直接暴露到公网且长期使用 HTTP。
 
+用户名和密码登录必须通过 HTTPS 或可信私有 VPN。fribench 的直接 HTTP 端口仅用于短期
+功能验证，客户端会明确显示“不安全测试连接”提示。
+
 ## 4. 管理员与同事
 
 首次启动时，服务端只在数据库没有用户时创建环境变量指定的管理员。
 
 管理员登录后：
 
-1. 在“用户”页面为每位同事创建账号；
-2. 同事登录自己的账号；
-3. 每台电脑分别创建一个 API 令牌；
-4. 每位用户使用自己的加密密钥初始化两台电脑。
+1. 普通用户在桌面客户端使用用户名和密码注册账号；
+2. 第一台设备生成账号同步密钥和恢复密钥；
+3. 其他设备登录同一账号后自动解锁同步密钥；
+4. 管理员可在“用户”页面查看账号隔离状态。
 
-用户之间的设备、令牌和交接记录相互隔离。管理员可以创建用户，但管理网页不会显示任何交接正文，因为服务器没有解密密钥。
+用户之间的设备、登录会话和交接记录相互隔离。旧 API Token 只保留用于升级兼容。
+管理网页不会显示任何交接正文，因为服务器没有账号同步密钥明文。
 
 ## 5. 客户端下载
 
@@ -123,9 +127,9 @@ docker compose up -d --no-build --force-recreate
 将下列文件放在服务器仓库的 `release/` 目录，再重启 Compose：
 
 ```text
-codex-continuity_0.3.2_windows-x64-setup.exe
-codex-continuity_0.3.2_windows-x64-offline-setup.exe
-codex-continuity_0.3.2_windows-x64-portable.zip
+codex-continuity_0.4.0_windows-x64-setup.exe
+codex-continuity_0.4.0_windows-x64-offline-setup.exe
+codex-continuity_0.4.0_windows-x64-portable.zip
 desktop-release.json
 SHA256SUMS.txt
 ```

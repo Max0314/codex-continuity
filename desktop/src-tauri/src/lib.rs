@@ -2,6 +2,7 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
+use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use rand::RngCore;
@@ -14,6 +15,7 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
+    process::Command,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
@@ -31,6 +33,8 @@ const KEYRING_SERVICE: &str = "com.neonet.codexcontinuity";
 const AUTO_SYNC_INTERVAL_SECONDS: i64 = 300;
 const MAX_LOCAL_CONVERSATIONS: usize = 1000;
 const MAX_BUNDLE_MIB: u16 = 500;
+const DEFAULT_SERVER_URL: &str = "http://1.14.72.50:24001";
+const AUTH_SESSION_SECRET: &str = "auth-session";
 
 #[derive(Clone, Default)]
 struct AppRuntime {
@@ -63,7 +67,7 @@ impl Default for SettingsFile {
             .filter(|value| !value.trim().is_empty())
             .unwrap_or_else(|| "Windows 电脑".to_string());
         Self {
-            server_url: String::new(),
+            server_url: DEFAULT_SERVER_URL.to_string(),
             root: r"D:\code_CPL".to_string(),
             device_name: host,
             device_id: String::new(),
@@ -105,8 +109,6 @@ struct SaveSettingsRequest {
     server_url: String,
     root: String,
     device_name: String,
-    token: Option<String>,
-    encryption_key: Option<String>,
     auto_sync: bool,
     launch_at_startup: bool,
     theme: String,
@@ -124,6 +126,83 @@ struct SaveSettingsResult {
     settings: PublicSettings,
     generated_key: Option<String>,
     connection: ConnectionResult,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct AuthUser {
+    id: String,
+    username: String,
+    display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct StoredAuthSession {
+    user: AuthUser,
+    access_token: String,
+    refresh_token: String,
+    access_expires_at: String,
+    refresh_expires_at: String,
+    transport_secure: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientAuthEnvelope {
+    user: AuthUser,
+    access_token: String,
+    refresh_token: String,
+    access_expires_at: String,
+    refresh_expires_at: String,
+    key_salt: String,
+    wrapped_key: String,
+    transport_secure: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LoginAccountRequest {
+    server_url: String,
+    username: String,
+    password: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RegisterAccountRequest {
+    server_url: String,
+    username: String,
+    display_name: String,
+    password: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RecoverAccountRequest {
+    server_url: String,
+    username: String,
+    password: String,
+    recovery_key: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthStatus {
+    authenticated: bool,
+    username: String,
+    display_name: String,
+    server_url: String,
+    legacy_account_available: bool,
+    transport_secure: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthActionResult {
+    status: AuthStatus,
+    message: String,
+    recovery_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -421,6 +500,162 @@ fn write_secret(name: &str, value: &str) -> Result<(), String> {
         .map_err(|error| format!("保存 Windows 凭据失败：{error}"))
 }
 
+fn delete_secret(name: &str) {
+    if let Ok(entry) = secret_entry(name) {
+        let _ = entry.delete_credential();
+    }
+}
+
+fn load_auth_session() -> Option<StoredAuthSession> {
+    let raw = read_secret(AUTH_SESSION_SECRET)?;
+    serde_json::from_str(&raw).ok()
+}
+
+fn write_auth_session(session: &StoredAuthSession) -> Result<(), String> {
+    let raw = serde_json::to_string(session).map_err(|error| error.to_string())?;
+    write_secret(AUTH_SESSION_SECRET, &raw)?;
+    write_secret("api-token", &session.access_token)
+}
+
+fn stored_session_from_envelope(envelope: &ClientAuthEnvelope) -> StoredAuthSession {
+    StoredAuthSession {
+        user: envelope.user.clone(),
+        access_token: envelope.access_token.clone(),
+        refresh_token: envelope.refresh_token.clone(),
+        access_expires_at: envelope.access_expires_at.clone(),
+        refresh_expires_at: envelope.refresh_expires_at.clone(),
+        transport_secure: envelope.transport_secure,
+    }
+}
+
+fn auth_status_for(settings: &SettingsFile) -> AuthStatus {
+    let session = load_auth_session();
+    AuthStatus {
+        authenticated: session.is_some(),
+        username: session
+            .as_ref()
+            .map(|value| value.user.username.clone())
+            .unwrap_or_default(),
+        display_name: session
+            .as_ref()
+            .map(|value| value.user.display_name.clone())
+            .unwrap_or_default(),
+        server_url: if settings.server_url.trim().is_empty() {
+            DEFAULT_SERVER_URL.to_string()
+        } else {
+            settings.server_url.clone()
+        },
+        legacy_account_available: read_secret("api-token").is_some() && session.is_none(),
+        transport_secure: session.as_ref().is_some_and(|value| value.transport_secure),
+    }
+}
+
+fn derive_account_wrapping_key(password: &str, salt: &[u8]) -> Result<[u8; 32], String> {
+    let params = Params::new(64 * 1024, 2, 2, Some(32))
+        .map_err(|error| format!("无法初始化账号密钥保护：{error}"))?;
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = [0u8; 32];
+    argon
+        .hash_password_into(password.as_bytes(), salt, &mut key)
+        .map_err(|error| format!("无法保护账号密钥：{error}"))?;
+    Ok(key)
+}
+
+fn wrap_account_key(password: &str, account_key: &[u8]) -> Result<(String, String), String> {
+    if account_key.len() != 32 {
+        return Err("账号同步密钥必须是 32 字节".to_string());
+    }
+    let mut salt = [0u8; 16];
+    rand::rng().fill_bytes(&mut salt);
+    let wrapping_key = derive_account_wrapping_key(password, &salt)?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&wrapping_key).map_err(|_| "账号密钥保护失败".to_string())?;
+    let mut nonce = [0u8; 12];
+    rand::rng().fill_bytes(&mut nonce);
+    let ciphertext = cipher
+        .encrypt(Nonce::from_slice(&nonce), account_key)
+        .map_err(|_| "账号密钥保护失败".to_string())?;
+    let mut wrapped = nonce.to_vec();
+    wrapped.extend(ciphertext);
+    Ok((
+        STANDARD_NO_PAD.encode(salt),
+        STANDARD_NO_PAD.encode(wrapped),
+    ))
+}
+
+fn unwrap_account_key(
+    password: &str,
+    key_salt: &str,
+    wrapped_key: &str,
+) -> Result<Vec<u8>, String> {
+    let salt = STANDARD_NO_PAD
+        .decode(key_salt.as_bytes())
+        .map_err(|_| "服务端账号密钥盐值无效".to_string())?;
+    let wrapped = STANDARD_NO_PAD
+        .decode(wrapped_key.as_bytes())
+        .map_err(|_| "服务端账号密钥格式无效".to_string())?;
+    if wrapped.len() <= 12 {
+        return Err("服务端账号密钥格式无效".to_string());
+    }
+    let wrapping_key = derive_account_wrapping_key(password, &salt)?;
+    let cipher =
+        Aes256Gcm::new_from_slice(&wrapping_key).map_err(|_| "账号密钥解锁失败".to_string())?;
+    cipher
+        .decrypt(Nonce::from_slice(&wrapped[..12]), &wrapped[12..])
+        .map_err(|_| "密码正确但账号同步密钥无法解锁，请使用恢复密钥".to_string())
+}
+
+fn normalized_mac(value: &str) -> Option<String> {
+    let normalized = value
+        .chars()
+        .filter(|character| character.is_ascii_hexdigit())
+        .map(|character| character.to_ascii_uppercase())
+        .collect::<String>();
+    if normalized.len() == 12 && normalized != "000000000000" {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
+fn first_mac_from_output(value: &str) -> Option<String> {
+    value
+        .split(|character: char| {
+            character == ',' || character == '"' || character.is_ascii_whitespace()
+        })
+        .find_map(normalized_mac)
+}
+
+fn primary_mac_address() -> Result<String, String> {
+    #[cfg(target_os = "windows")]
+    {
+        let route_script = "Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object MacAddress | Sort-Object InterfaceIndex | Select-Object -First 1 -ExpandProperty MacAddress";
+        if let Ok(output) = Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command", route_script])
+            .output()
+        {
+            if output.status.success() {
+                if let Some(mac) = first_mac_from_output(&String::from_utf8_lossy(&output.stdout)) {
+                    return Ok(mac);
+                }
+            }
+        }
+        if let Ok(output) = Command::new("getmac").args(["/fo", "csv", "/nh"]).output() {
+            if output.status.success() {
+                if let Some(mac) = first_mac_from_output(&String::from_utf8_lossy(&output.stdout)) {
+                    return Ok(mac);
+                }
+            }
+        }
+    }
+    Err("无法读取可用网卡的 MAC 地址，暂时不能注册此设备".to_string())
+}
+
+fn mac_device_id(user_id: &str, mac: &str) -> String {
+    let digest = Sha256::digest(format!("{}\0{}", user_id.trim(), mac.trim()).as_bytes());
+    format!("mac_{digest:x}")
+}
+
 fn public_settings(settings: &SettingsFile) -> PublicSettings {
     PublicSettings {
         server_url: settings.server_url.clone(),
@@ -435,7 +670,7 @@ fn public_settings(settings: &SettingsFile) -> PublicSettings {
         include_archived: settings.include_archived,
         include_unassigned: settings.include_unassigned,
         max_bundle_mib: settings.max_bundle_mib,
-        has_token: read_secret("api-token").is_some(),
+        has_token: load_auth_session().is_some(),
         has_encryption_key: read_secret("encryption-key").is_some(),
         version: APP_VERSION.to_string(),
     }
@@ -468,7 +703,7 @@ fn configured(settings: &SettingsFile) -> bool {
     !settings.server_url.is_empty()
         && !settings.device_id.is_empty()
         && Path::new(&settings.root).is_dir()
-        && read_secret("api-token").is_some()
+        && load_auth_session().is_some()
         && read_secret("encryption-key").is_some()
 }
 
@@ -499,6 +734,121 @@ async fn check_connection(server_url: &str) -> Result<ConnectionResult, String> 
             .unwrap_or("codex-continuity")
             .to_string(),
         checked_at: now_iso(),
+    })
+}
+
+async fn parse_auth_response(response: reqwest::Response) -> Result<ClientAuthEnvelope, String> {
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(response_error(status, &body));
+    }
+    serde_json::from_str(&body).map_err(|error| format!("账号登录响应无效：{error}"))
+}
+
+async fn ensure_access_token(settings: &SettingsFile) -> Result<String, String> {
+    let mut session = load_auth_session().ok_or_else(|| "请先登录账号".to_string())?;
+    let still_valid = DateTime::parse_from_rfc3339(&session.access_expires_at)
+        .map(|expires| expires.with_timezone(&Utc) > Utc::now() + ChronoDuration::minutes(1))
+        .unwrap_or(false);
+    if still_valid {
+        write_secret("api-token", &session.access_token)?;
+        return Ok(session.access_token);
+    }
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| error.to_string())?
+        .post(format!(
+            "{}/api/v1/client/auth/refresh",
+            settings.server_url.trim_end_matches('/')
+        ))
+        .json(&json!({ "refreshToken": session.refresh_token }))
+        .send()
+        .await
+        .map_err(|error| format!("刷新登录状态失败：{error}"))?;
+    let envelope = parse_auth_response(response).await?;
+    session = stored_session_from_envelope(&envelope);
+    write_auth_session(&session)?;
+    Ok(session.access_token)
+}
+
+async fn register_current_device(
+    settings: &SettingsFile,
+    server_url: &str,
+    access_token: &str,
+    user_id: &str,
+) -> Result<String, String> {
+    let mac = primary_mac_address()?;
+    let device_id = mac_device_id(user_id, &mac);
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .map_err(|error| error.to_string())?
+        .post(format!(
+            "{}/api/v1/client/devices",
+            server_url.trim_end_matches('/')
+        ))
+        .bearer_auth(access_token)
+        .json(&json!({
+            "id": device_id,
+            "name": settings.device_name.trim(),
+            "hostname": hostname::get().ok().map(|value| value.to_string_lossy().to_string()).unwrap_or_default(),
+            "os": format!("windows/{}", std::env::consts::ARCH),
+            "clientVersion": APP_VERSION,
+            "lastSeenAt": "0001-01-01T00:00:00Z",
+            "createdAt": "0001-01-01T00:00:00Z"
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("注册设备失败：{error}"))?;
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        return Err(response_error(status, &body));
+    }
+    let device = serde_json::from_str::<DeviceEnvelope>(&body)
+        .map_err(|error| format!("设备注册响应无效：{error}"))?;
+    Ok(device.device.id)
+}
+
+async fn finish_account_login(
+    app: &AppHandle,
+    server_url: String,
+    password: &str,
+    envelope: ClientAuthEnvelope,
+    account_key: Option<Vec<u8>>,
+) -> Result<AuthActionResult, String> {
+    let key = match account_key {
+        Some(value) => value,
+        None => unwrap_account_key(password, &envelope.key_salt, &envelope.wrapped_key)?,
+    };
+    if key.len() != 32 {
+        return Err("账号同步密钥长度无效".to_string());
+    }
+    let mut settings = load_settings_file(app)?;
+    let device_id = register_current_device(
+        &settings,
+        &server_url,
+        &envelope.access_token,
+        &envelope.user.id,
+    )
+    .await?;
+    let session = stored_session_from_envelope(&envelope);
+    write_secret("encryption-key", &STANDARD_NO_PAD.encode(&key))?;
+    write_auth_session(&session)?;
+    settings.server_url = server_url;
+    settings.device_id = device_id;
+    write_settings_file(app, &settings)?;
+    let status = auth_status_for(&settings);
+    Ok(AuthActionResult {
+        message: if status.transport_secure {
+            "账号已登录，本机同步密钥已自动解锁".to_string()
+        } else {
+            "账号已登录；当前服务端使用 HTTP，请尽快升级为 HTTPS".to_string()
+        },
+        status,
+        recovery_key: None,
     })
 }
 
@@ -1055,7 +1405,7 @@ async fn dashboard_data(app: &AppHandle) -> Result<DashboardSnapshot, String> {
     if is_configured {
         if let Ok(result) = check_connection(&settings.server_url).await {
             connection = Some(result);
-            if let Some(token) = read_secret("api-token") {
+            if let Ok(token) = ensure_access_token(&settings).await {
                 handoffs = list_handoffs(&settings, &token).await.unwrap_or_default();
             }
         }
@@ -1105,7 +1455,7 @@ fn encrypted_test_payload(key: &[u8]) -> Result<(usize, Vec<u8>, String), String
 }
 
 fn temp_core_config(settings: &SettingsFile) -> Result<tempfile::NamedTempFile, String> {
-    let token = read_secret("api-token").ok_or_else(|| "请先保存 API 令牌".to_string())?;
+    let token = read_secret("api-token").ok_or_else(|| "请先登录账号".to_string())?;
     let encryption_key =
         read_secret("encryption-key").ok_or_else(|| "请先配置加密密钥".to_string())?;
     let mut file = tempfile::Builder::new()
@@ -1170,8 +1520,9 @@ async fn perform_sync(
     let _guard = runtime.sync_lock.lock().await;
     let settings = load_settings_file(app)?;
     if !configured(&settings) {
-        return Err("请先在“设置”中完成服务端、API 令牌和加密密钥配置".to_string());
+        return Err("请先登录账号并完成工作区设置".to_string());
     }
+    ensure_access_token(&settings).await?;
     let local = scan_local_conversations(&settings);
     let scoped_local = scoped_local_conversations(&settings, &local);
     let fingerprint = conversation_fingerprint(&scoped_local);
@@ -1269,6 +1620,171 @@ fn get_settings(app: AppHandle) -> Result<PublicSettings, String> {
 }
 
 #[tauri::command]
+fn get_auth_status(app: AppHandle) -> Result<AuthStatus, String> {
+    load_settings_file(&app).map(|settings| auth_status_for(&settings))
+}
+
+#[tauri::command]
+async fn register_account(
+    app: AppHandle,
+    request: RegisterAccountRequest,
+) -> Result<AuthActionResult, String> {
+    let server_url = normalized_url(&request.server_url)?;
+    check_connection(&server_url).await?;
+    let existing_key = read_secret("encryption-key")
+        .and_then(|value| STANDARD_NO_PAD.decode(value.as_bytes()).ok())
+        .filter(|value| value.len() == 32);
+    let generated = existing_key.is_none();
+    let account_key = existing_key.unwrap_or_else(|| {
+        let mut key = vec![0u8; 32];
+        rand::rng().fill_bytes(&mut key);
+        key
+    });
+    let (key_salt, wrapped_key) = wrap_account_key(&request.password, &account_key)?;
+    let recovery_key_hash = format!("{:x}", Sha256::digest(&account_key));
+    let legacy_token = if load_auth_session().is_none() {
+        read_secret("api-token").unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| error.to_string())?
+        .post(format!("{server_url}/api/v1/client/auth/register"))
+        .json(&json!({
+            "username": request.username.trim(),
+            "displayName": request.display_name.trim(),
+            "password": request.password,
+            "keySalt": key_salt,
+            "wrappedKey": wrapped_key,
+            "recoveryKeyHash": recovery_key_hash,
+            "legacyToken": legacy_token
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("注册账号失败：{error}"))?;
+    let envelope = parse_auth_response(response).await?;
+    let mut result = finish_account_login(
+        &app,
+        server_url,
+        &request.password,
+        envelope,
+        Some(account_key.clone()),
+    )
+    .await?;
+    result.recovery_key = Some(STANDARD_NO_PAD.encode(account_key));
+    if generated {
+        result.message =
+            "账号已创建并登录；请立即保存恢复密钥，其他设备无需手工复制同步密钥".to_string();
+    } else {
+        result.message = "现有同步数据已安全关联到新账号".to_string();
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+async fn login_account(
+    app: AppHandle,
+    request: LoginAccountRequest,
+) -> Result<AuthActionResult, String> {
+    let server_url = normalized_url(&request.server_url)?;
+    check_connection(&server_url).await?;
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| error.to_string())?
+        .post(format!("{server_url}/api/v1/client/auth/login"))
+        .json(&json!({
+            "username": request.username.trim(),
+            "password": request.password
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("登录账号失败：{error}"))?;
+    let envelope = parse_auth_response(response).await?;
+    finish_account_login(&app, server_url, &request.password, envelope, None).await
+}
+
+#[tauri::command]
+async fn recover_account(
+    app: AppHandle,
+    request: RecoverAccountRequest,
+) -> Result<AuthActionResult, String> {
+    let server_url = normalized_url(&request.server_url)?;
+    check_connection(&server_url).await?;
+    let account_key = STANDARD_NO_PAD
+        .decode(request.recovery_key.trim().as_bytes())
+        .map_err(|_| "恢复密钥格式无效".to_string())?;
+    if account_key.len() != 32 {
+        return Err("恢复密钥长度无效".to_string());
+    }
+    let (key_salt, wrapped_key) = wrap_account_key(&request.password, &account_key)?;
+    let recovery_key_hash = format!("{:x}", Sha256::digest(&account_key));
+    let response = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|error| error.to_string())?
+        .post(format!("{server_url}/api/v1/client/auth/recover"))
+        .json(&json!({
+            "username": request.username.trim(),
+            "password": request.password,
+            "recoveryKeyHash": recovery_key_hash,
+            "keySalt": key_salt,
+            "wrappedKey": wrapped_key
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("恢复账户失败：{error}"))?;
+    let envelope = parse_auth_response(response).await?;
+    let mut result = finish_account_login(
+        &app,
+        server_url,
+        &request.password,
+        envelope,
+        Some(account_key),
+    )
+    .await?;
+    result.message = "密码已重置，其他设备上的旧登录会话已失效".to_string();
+    Ok(result)
+}
+
+#[tauri::command]
+async fn logout_account(app: AppHandle) -> Result<ActionResult, String> {
+    let mut settings = load_settings_file(&app)?;
+    if let Some(session) = load_auth_session() {
+        let _ = reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .build()
+            .map_err(|error| error.to_string())?
+            .post(format!(
+                "{}/api/v1/client/auth/logout",
+                settings.server_url.trim_end_matches('/')
+            ))
+            .json(&json!({ "refreshToken": session.refresh_token }))
+            .send()
+            .await;
+    }
+    delete_secret(AUTH_SESSION_SECRET);
+    delete_secret("api-token");
+    delete_secret("encryption-key");
+    settings.device_id.clear();
+    write_settings_file(&app, &settings)?;
+    Ok(ActionResult {
+        ok: true,
+        message: "已退出账号，本机登录令牌和同步密钥已清除".to_string(),
+    })
+}
+
+#[tauri::command]
+fn get_recovery_key() -> Result<String, String> {
+    if load_auth_session().is_none() {
+        return Err("请先登录账号".to_string());
+    }
+    read_secret("encryption-key").ok_or_else(|| "本机恢复密钥不可用，请重新登录".to_string())
+}
+
+#[tauri::command]
 async fn save_settings(
     app: AppHandle,
     request: SaveSettingsRequest,
@@ -1303,72 +1819,25 @@ async fn save_settings(
     {
         return Err("同步项目路径无效".to_string());
     }
-    let token = request
-        .token
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| read_secret("api-token"))
-        .ok_or_else(|| "请填写客户端 API 令牌".to_string())?;
-    let existing_key = read_secret("encryption-key");
-    let requested_key = request
-        .encryption_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string);
-    let generated_key = if requested_key.is_none() && existing_key.is_none() {
-        let mut key = [0u8; 32];
-        rand::rng().fill_bytes(&mut key);
-        Some(STANDARD_NO_PAD.encode(key))
-    } else {
-        None
-    };
-    let encryption_key = requested_key
-        .or(existing_key)
-        .or_else(|| generated_key.clone())
-        .ok_or_else(|| "无法生成加密密钥".to_string())?;
+    if !current.server_url.eq_ignore_ascii_case(&server_url) {
+        return Err("切换服务端前请先退出当前账号，再在登录页选择新的服务端".to_string());
+    }
+    let session = load_auth_session().ok_or_else(|| "请先登录账号".to_string())?;
+    let token = ensure_access_token(&current).await?;
+    let encryption_key = read_secret("encryption-key")
+        .ok_or_else(|| "账号同步密钥不可用，请重新登录".to_string())?;
     let decoded = STANDARD_NO_PAD
         .decode(encryption_key.as_bytes())
-        .map_err(|_| "加密密钥必须是 32 字节密钥的 Base64 文本".to_string())?;
+        .map_err(|_| "Windows 凭据中的账号同步密钥无效".to_string())?;
     if decoded.len() != 32 {
-        return Err("加密密钥必须是 32 字节密钥的 Base64 文本".to_string());
+        return Err("Windows 凭据中的账号同步密钥长度无效".to_string());
     }
-
     let connection = check_connection(&server_url).await?;
-    let response = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .map_err(|error| error.to_string())?
-        .post(format!("{server_url}/api/v1/client/devices"))
-        .bearer_auth(&token)
-        .json(&json!({
-            "id": current.device_id,
-            "name": request.device_name.trim(),
-            "hostname": hostname::get().ok().map(|value| value.to_string_lossy().to_string()).unwrap_or_default(),
-            "os": format!("windows/{}", std::env::consts::ARCH),
-            "clientVersion": APP_VERSION,
-            "lastSeenAt": "0001-01-01T00:00:00Z",
-            "createdAt": "0001-01-01T00:00:00Z"
-        }))
-        .send()
-        .await
-        .map_err(|error| format!("注册设备失败：{error}"))?;
-    let status = response.status();
-    let body = response.text().await.unwrap_or_default();
-    if !status.is_success() {
-        return Err(response_error(status, &body));
-    }
-    let device = serde_json::from_str::<DeviceEnvelope>(&body)
-        .map_err(|error| format!("设备注册响应无效：{error}"))?;
-
-    write_secret("api-token", &token)?;
-    write_secret("encryption-key", &encryption_key)?;
     current.server_url = server_url;
     current.root = root.to_string_lossy().to_string();
     current.device_name = request.device_name.trim().to_string();
-    current.device_id = device.device.id;
+    current.device_id =
+        register_current_device(&current, &current.server_url, &token, &session.user.id).await?;
     current.auto_sync = request.auto_sync;
     current.launch_at_startup = request.launch_at_startup;
     current.theme = request.theme;
@@ -1385,7 +1854,7 @@ async fn save_settings(
     }
     Ok(SaveSettingsResult {
         settings: public_settings(&current),
-        generated_key,
+        generated_key: None,
         connection,
     })
 }
@@ -1402,7 +1871,7 @@ async fn test_connection(app: AppHandle) -> Result<ConnectionResult, String> {
 #[tauri::command]
 async fn test_upload(app: AppHandle) -> Result<UploadTestResult, String> {
     let settings = load_settings_file(&app)?;
-    let token = read_secret("api-token").ok_or_else(|| "请先保存 API 令牌".to_string())?;
+    let token = ensure_access_token(&settings).await?;
     let key = read_secret("encryption-key").ok_or_else(|| "请先配置加密密钥".to_string())?;
     let key = STANDARD_NO_PAD
         .decode(key.as_bytes())
@@ -1897,6 +2366,12 @@ pub fn run() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            get_auth_status,
+            register_account,
+            login_account,
+            recover_account,
+            logout_account,
+            get_recovery_key,
             get_settings,
             save_settings,
             test_connection,
@@ -1952,5 +2427,27 @@ mod tests {
             "https://continuity.example.com:8443"
         );
         assert_eq!(server_origin("not-a-url"), "未配置");
+    }
+
+    #[test]
+    fn wraps_and_unlocks_account_sync_key() {
+        let account_key = [42u8; 32];
+        let (salt, wrapped) = wrap_account_key("a-strong-test-password", &account_key).unwrap();
+        let unlocked = unwrap_account_key("a-strong-test-password", &salt, &wrapped).unwrap();
+        assert_eq!(unlocked, account_key);
+        assert!(unwrap_account_key("wrong-password", &salt, &wrapped).is_err());
+    }
+
+    #[test]
+    fn derives_stable_account_scoped_device_id_from_mac() {
+        assert_eq!(
+            normalized_mac("AA-BB-CC-DD-EE-FF").as_deref(),
+            Some("AABBCCDDEEFF")
+        );
+        let first = mac_device_id("user-a", "AABBCCDDEEFF");
+        assert_eq!(first, mac_device_id("user-a", "AABBCCDDEEFF"));
+        assert_ne!(first, mac_device_id("user-b", "AABBCCDDEEFF"));
+        assert!(first.starts_with("mac_"));
+        assert_eq!(first.len(), 68);
     }
 }

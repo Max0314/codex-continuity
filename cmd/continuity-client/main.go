@@ -16,7 +16,7 @@ import (
 	"github.com/neonet/codex-continuity/internal/model"
 )
 
-const version = "0.3.2"
+const version = "0.4.0"
 
 func main() {
 	if len(os.Args) < 2 {

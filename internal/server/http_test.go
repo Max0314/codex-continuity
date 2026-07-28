@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -25,15 +26,17 @@ func TestLoginAndClientHandoffFlow(t *testing.T) {
 	t.Setenv("TMP", missingTempDir)
 	t.Setenv("TEMP", missingTempDir)
 	cfg := Config{
-		Address:        ":0",
-		DataDir:        dataDir,
-		WebDir:         filepath.Join(dataDir, "missing-web"),
-		AdminEmail:     "admin@example.com",
-		AdminPassword:  "a-strong-test-password",
-		AdminName:      "测试管理员",
-		SessionTTL:     24 * 60 * 60 * 1e9,
-		MaxUploadBytes: 20 << 20,
-		DownloadDir:    filepath.Join(dataDir, "downloads"),
+		Address:          ":0",
+		DataDir:          dataDir,
+		WebDir:           filepath.Join(dataDir, "missing-web"),
+		AdminEmail:       "admin@example.com",
+		AdminPassword:    "a-strong-test-password",
+		AdminName:        "测试管理员",
+		SessionTTL:       24 * 60 * 60 * 1e9,
+		ClientAccessTTL:  15 * 60 * 1e9,
+		ClientRefreshTTL: 30 * 24 * 60 * 60 * 1e9,
+		MaxUploadBytes:   20 << 20,
+		DownloadDir:      filepath.Join(dataDir, "downloads"),
 	}
 	store, err := OpenStore(cfg)
 	if err != nil {
@@ -74,12 +77,42 @@ func TestLoginAndClientHandoffFlow(t *testing.T) {
 		t.Fatalf("unexpected API token: %q", tokenPayload.Secret)
 	}
 
+	registerRequest, _ := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/api/v1/client/auth/register",
+		strings.NewReader(fmt.Sprintf(`{
+		  "username":"cpl","displayName":"测试管理员","password":"a-new-strong-password",
+		  "keySalt":"test-salt","wrappedKey":"test-wrapped-key",
+		  "recoveryKeyHash":%q,"legacyToken":%q
+		}`, strings.Repeat("b", 64), tokenPayload.Secret)),
+	)
+	registerRequest.Header.Set("Content-Type", "application/json")
+	registerResponse, err := http.DefaultClient.Do(registerRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer registerResponse.Body.Close()
+	var clientAuth struct {
+		User         model.User `json:"user"`
+		AccessToken  string     `json:"accessToken"`
+		RefreshToken string     `json:"refreshToken"`
+	}
+	if err := json.NewDecoder(registerResponse.Body).Decode(&clientAuth); err != nil {
+		t.Fatal(err)
+	}
+	if registerResponse.StatusCode != http.StatusCreated ||
+		clientAuth.User.Username != "cpl" ||
+		!strings.HasPrefix(clientAuth.AccessToken, "ca_") ||
+		!strings.HasPrefix(clientAuth.RefreshToken, "cr_") {
+		t.Fatalf("unexpected client registration: status=%d payload=%#v", registerResponse.StatusCode, clientAuth)
+	}
+
 	diagnosticRequest, _ := http.NewRequest(
 		http.MethodPost,
 		server.URL+"/api/v1/client/diagnostics/upload-test",
 		bytes.NewReader(bytes.Repeat([]byte{0x42}, 64*1024)),
 	)
-	diagnosticRequest.Header.Set("Authorization", "Bearer "+tokenPayload.Secret)
+	diagnosticRequest.Header.Set("Authorization", "Bearer "+clientAuth.AccessToken)
 	diagnosticRequest.Header.Set("Content-Type", "application/octet-stream")
 	diagnosticResponse, err := http.DefaultClient.Do(diagnosticRequest)
 	if err != nil {
@@ -99,9 +132,10 @@ func TestLoginAndClientHandoffFlow(t *testing.T) {
 	}
 
 	deviceRequest := bearerJSONRequest(t, http.MethodPost, server.URL+"/api/v1/client/devices", `{
-	  "id":"","name":"办公室电脑","hostname":"office-pc","os":"windows/amd64",
+	  "id":"mac_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	  "name":"办公室电脑","hostname":"office-pc","os":"windows/amd64",
 	  "clientVersion":"0.1.0","lastSeenAt":"0001-01-01T00:00:00Z","createdAt":"0001-01-01T00:00:00Z"
-	}`, tokenPayload.Secret)
+	}`, clientAuth.AccessToken)
 	deviceResponse, err := http.DefaultClient.Do(deviceRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -113,13 +147,35 @@ func TestLoginAndClientHandoffFlow(t *testing.T) {
 	if err := json.NewDecoder(deviceResponse.Body).Decode(&devicePayload); err != nil {
 		t.Fatal(err)
 	}
-	if devicePayload.Device.ID == "" {
-		t.Fatal("device was not assigned an ID")
+	if devicePayload.Device.ID != "mac_"+strings.Repeat("a", 64) {
+		t.Fatalf("device ID = %q", devicePayload.Device.ID)
 	}
 
-	handoffID := uploadTestHandoff(t, server.URL, tokenPayload.Secret, devicePayload.Device.ID)
+	renameRequest := bearerJSONRequest(t, http.MethodPost, server.URL+"/api/v1/client/devices", `{
+	  "id":"mac_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	  "name":"办公室电脑（已改名）","hostname":"office-pc","os":"windows/amd64",
+	  "clientVersion":"0.4.0","lastSeenAt":"0001-01-01T00:00:00Z","createdAt":"0001-01-01T00:00:00Z"
+	}`, clientAuth.AccessToken)
+	renameResponse, err := http.DefaultClient.Do(renameRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer renameResponse.Body.Close()
+	var renamedPayload struct {
+		Device model.Device `json:"device"`
+	}
+	if err := json.NewDecoder(renameResponse.Body).Decode(&renamedPayload); err != nil {
+		t.Fatal(err)
+	}
+	if renameResponse.StatusCode != http.StatusOK ||
+		renamedPayload.Device.ID != devicePayload.Device.ID ||
+		renamedPayload.Device.Name != "办公室电脑（已改名）" {
+		t.Fatalf("unexpected renamed device: status=%d payload=%#v", renameResponse.StatusCode, renamedPayload)
+	}
+
+	handoffID := uploadTestHandoff(t, server.URL, clientAuth.AccessToken, devicePayload.Device.ID)
 	listRequest, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/client/handoffs?status=pending&target=%E5%85%AC%E5%8F%B8%E7%94%B5%E8%84%91", nil)
-	listRequest.Header.Set("Authorization", "Bearer "+tokenPayload.Secret)
+	listRequest.Header.Set("Authorization", "Bearer "+clientAuth.AccessToken)
 	listResponse, err := http.DefaultClient.Do(listRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +195,7 @@ func TestLoginAndClientHandoffFlow(t *testing.T) {
 	}
 
 	downloadRequest, _ := http.NewRequest(http.MethodGet, server.URL+"/api/v1/client/handoffs/"+handoffID+"/blob", nil)
-	downloadRequest.Header.Set("Authorization", "Bearer "+tokenPayload.Secret)
+	downloadRequest.Header.Set("Authorization", "Bearer "+clientAuth.AccessToken)
 	downloadResponse, err := http.DefaultClient.Do(downloadRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -150,7 +206,7 @@ func TestLoginAndClientHandoffFlow(t *testing.T) {
 		t.Fatalf("downloaded payload = %q", downloaded)
 	}
 
-	claimRequest := bearerJSONRequest(t, http.MethodPost, server.URL+"/api/v1/client/handoffs/"+handoffID+"/claim", `{"targetDeviceName":"公司电脑"}`, tokenPayload.Secret)
+	claimRequest := bearerJSONRequest(t, http.MethodPost, server.URL+"/api/v1/client/handoffs/"+handoffID+"/claim", `{"targetDeviceName":"公司电脑"}`, clientAuth.AccessToken)
 	claimResponse, err := http.DefaultClient.Do(claimRequest)
 	if err != nil {
 		t.Fatal(err)
@@ -163,12 +219,92 @@ func TestLoginAndClientHandoffFlow(t *testing.T) {
 	largeHandoffID := uploadSizedTestHandoff(
 		t,
 		server.URL,
-		tokenPayload.Secret,
+		clientAuth.AccessToken,
 		devicePayload.Device.ID,
 		17<<20,
 	)
 	if largeHandoffID == "" {
 		t.Fatal("17 MiB streaming handoff was not created")
+	}
+
+	refreshRequest, _ := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/api/v1/client/auth/refresh",
+		strings.NewReader(fmt.Sprintf(`{"refreshToken":%q}`, clientAuth.RefreshToken)),
+	)
+	refreshRequest.Header.Set("Content-Type", "application/json")
+	refreshResponse, err := http.DefaultClient.Do(refreshRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer refreshResponse.Body.Close()
+	var refreshed struct {
+		AccessToken  string `json:"accessToken"`
+		RefreshToken string `json:"refreshToken"`
+	}
+	if err := json.NewDecoder(refreshResponse.Body).Decode(&refreshed); err != nil {
+		t.Fatal(err)
+	}
+	if refreshResponse.StatusCode != http.StatusOK ||
+		refreshed.AccessToken == clientAuth.AccessToken ||
+		refreshed.RefreshToken == clientAuth.RefreshToken {
+		t.Fatalf("client session was not rotated: status=%d payload=%#v", refreshResponse.StatusCode, refreshed)
+	}
+	expiredAccessRequest, _ := http.NewRequest(
+		http.MethodGet,
+		server.URL+"/api/v1/client/handoffs",
+		nil,
+	)
+	expiredAccessRequest.Header.Set("Authorization", "Bearer "+clientAuth.AccessToken)
+	expiredAccessResponse, err := http.DefaultClient.Do(expiredAccessRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredAccessResponse.Body.Close()
+	if expiredAccessResponse.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("rotated access token status = %d, want 401", expiredAccessResponse.StatusCode)
+	}
+
+	recoverRequest, _ := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/api/v1/client/auth/recover",
+		strings.NewReader(fmt.Sprintf(`{
+		  "username":"cpl","password":"a-recovered-strong-password",
+		  "recoveryKeyHash":%q,"keySalt":"test-salt-v2","wrappedKey":"test-wrapped-key-v2"
+		}`, strings.Repeat("b", 64))),
+	)
+	recoverRequest.Header.Set("Content-Type", "application/json")
+	recoverResponse, err := http.DefaultClient.Do(recoverRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recoverResponse.Body.Close()
+	var recovered struct {
+		AccessToken string `json:"accessToken"`
+		WrappedKey  string `json:"wrappedKey"`
+	}
+	if err := json.NewDecoder(recoverResponse.Body).Decode(&recovered); err != nil {
+		t.Fatal(err)
+	}
+	if recoverResponse.StatusCode != http.StatusOK ||
+		!strings.HasPrefix(recovered.AccessToken, "ca_") ||
+		recovered.WrappedKey != "test-wrapped-key-v2" {
+		t.Fatalf("unexpected recovery response: status=%d payload=%#v", recoverResponse.StatusCode, recovered)
+	}
+
+	loginWithRecoveredPassword, _ := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/api/v1/client/auth/login",
+		strings.NewReader(`{"username":"cpl","password":"a-recovered-strong-password"}`),
+	)
+	loginWithRecoveredPassword.Header.Set("Content-Type", "application/json")
+	recoveredLoginResponse, err := http.DefaultClient.Do(loginWithRecoveredPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recoveredLoginResponse.Body.Close()
+	if recoveredLoginResponse.StatusCode != http.StatusOK {
+		t.Fatalf("login with recovered password status = %d", recoveredLoginResponse.StatusCode)
 	}
 }
 

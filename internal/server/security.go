@@ -7,10 +7,21 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"golang.org/x/crypto/argon2"
 )
+
+var usernamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{2,31}$`)
+
+func normalizeUsername(value string) (string, error) {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if !usernamePattern.MatchString(value) {
+		return "", fmt.Errorf("用户名需为 3–32 位，只能包含字母、数字、点、下划线和连字符")
+	}
+	return value, nil
+}
 
 const (
 	argonTime    = 2

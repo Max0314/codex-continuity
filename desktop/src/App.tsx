@@ -29,6 +29,8 @@ import {
   KeyRound,
   Link2,
   ListFilter,
+  LockKeyhole,
+  LogIn,
   LogOut,
   Menu,
   MessageSquareText,
@@ -40,6 +42,7 @@ import {
   Settings,
   ShieldCheck,
   Upload,
+  UserRound,
   X,
 } from 'lucide-react'
 import { desktopApi } from './api'
@@ -48,6 +51,8 @@ import type {
   Conversation,
   ConversationSyncStatus,
   DashboardSnapshot,
+  AuthActionResult,
+  AuthStatus,
   PageName,
   PublicSettings,
   SaveSettingsRequest,
@@ -96,6 +101,7 @@ function pageFromHash(): PageName {
 }
 
 function DesktopApp() {
+  const [auth, setAuth] = useState<AuthStatus | null>(null)
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null)
   const [page, setPage] = useState<PageName>(pageFromHash)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -117,18 +123,34 @@ function DesktopApp() {
   }, [])
 
   useEffect(() => {
-    reload()
+    desktopApi.authStatus()
+      .then((status) => {
+        setAuth(status)
+        if (status.authenticated) reload()
+      })
+      .catch((error) => {
+        setToast({ tone: 'error', text: errorMessage(error) })
+        setAuth({
+          authenticated: false,
+          username: '',
+          displayName: '',
+          serverUrl: 'http://1.14.72.50:24001',
+          legacyAccountAvailable: false,
+          transportSecure: false,
+        })
+      })
     const onHashChange = () => setPage(pageFromHash())
     window.addEventListener('hashchange', onHashChange)
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [reload])
 
   useEffect(() => {
+    if (!auth?.authenticated) return
     const interval = window.setInterval(() => {
       if (document.visibilityState === 'visible' && !busy) reload(true)
     }, 12_000)
     return () => window.clearInterval(interval)
-  }, [busy, reload])
+  }, [auth?.authenticated, busy, reload])
 
   useEffect(() => {
     if (!toast) return
@@ -174,7 +196,20 @@ function DesktopApp() {
     }
   }
 
-  if (!snapshot) return <LoadingScreen />
+  if (!auth) return <LoadingScreen label="正在检查账号状态…" />
+  if (!auth.authenticated) {
+    return (
+      <AccountGate
+        initial={auth}
+        onAuthenticated={async (result) => {
+          setAuth(result.status)
+          setToast({ tone: 'success', text: result.message })
+          await reload()
+        }}
+      />
+    )
+  }
+  if (!snapshot) return <LoadingScreen label="正在读取本机 Codex 会话…" />
 
   const syncNow = () => runAction(
     'sync',
@@ -261,17 +296,25 @@ function DesktopApp() {
         ) : null}
         {page === 'settings' ? (
           <SettingsPage
+            auth={auth}
             settings={snapshot.settings}
             projects={snapshot.syncProjects}
             busy={busy}
             onRun={runAction}
-            onSaved={(settings, generatedKey) => {
+            onSaved={(settings) => {
               setSnapshot({ ...snapshot, configured: true, settings })
-              setToast({
-                tone: 'success',
-                text: generatedKey ? '配置已保存，请立即复制新生成的加密密钥' : '配置已保存并完成设备注册',
-              })
+              setToast({ tone: 'success', text: '配置已保存并更新当前设备' })
             }}
+            onLogout={() => runAction(
+              'logout',
+              desktopApi.logoutAccount,
+              (result) => {
+                setAuth({ ...auth, authenticated: false, username: '', displayName: '' })
+                setSnapshot(null)
+                setToast({ tone: 'success', text: result.message })
+              },
+              false,
+            )}
             onToast={setToast}
           />
         ) : null}
@@ -282,12 +325,205 @@ function DesktopApp() {
   )
 }
 
-function LoadingScreen() {
+function LoadingScreen({ label = '正在读取本机 Codex 会话…' }: { label?: string }) {
   return (
     <div className="loading-screen">
       <BrandMark />
       <span className="spinner" />
-      <p>正在读取本机 Codex 会话…</p>
+      <p>{label}</p>
+    </div>
+  )
+}
+
+function AccountGate({
+  initial,
+  onAuthenticated,
+}: {
+  initial: AuthStatus
+  onAuthenticated: (result: AuthActionResult) => Promise<void>
+}) {
+  const [mode, setMode] = useState<'login' | 'register' | 'recover'>(
+    initial.legacyAccountAvailable ? 'register' : 'login',
+  )
+  const [serverUrl, setServerUrl] = useState(initial.serverUrl)
+  const [username, setUsername] = useState('')
+  const [displayName, setDisplayName] = useState('')
+  const [password, setPassword] = useState('')
+  const [confirmation, setConfirmation] = useState('')
+  const [recoveryKey, setRecoveryKey] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState('')
+  const [pendingResult, setPendingResult] = useState<AuthActionResult | null>(null)
+
+  async function submit(event: FormEvent) {
+    event.preventDefault()
+    setError('')
+    if (mode !== 'login' && password !== confirmation) {
+      setError('两次输入的密码不一致')
+      return
+    }
+    if (password.length < 10) {
+      setError('密码至少需要 10 位')
+      return
+    }
+    setBusy(true)
+    try {
+      const result = mode === 'login'
+        ? await desktopApi.loginAccount({ serverUrl, username, password })
+        : mode === 'recover'
+          ? await desktopApi.recoverAccount({ serverUrl, username, password, recoveryKey })
+          : await desktopApi.registerAccount({
+            serverUrl,
+            username,
+            displayName: displayName || username,
+            password,
+          })
+      if (result.recoveryKey) {
+        setPendingResult(result)
+      } else {
+        await onAuthenticated(result)
+      }
+    } catch (requestError) {
+      setError(errorMessage(requestError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (pendingResult?.recoveryKey) {
+    return (
+      <div className="account-gate">
+        <section className="account-card recovery-card">
+          <span className="account-mark"><FileKey2 size={24} /></span>
+          <div>
+            <span className="account-kicker">账号创建成功</span>
+            <h1>保存恢复密钥</h1>
+            <p>它只用于密码丢失后的数据恢复。其他设备正常登录时不需要复制这串内容。</p>
+          </div>
+          <div className="recovery-key-box">
+            <code>{pendingResult.recoveryKey}</code>
+            <CopyButton text={pendingResult.recoveryKey} label="复制恢复密钥" />
+          </div>
+          <div className="account-warning">
+            <CircleAlert size={17} />
+            <span>没有恢复密钥且没有已登录设备时，忘记密码后无法解密历史归档。</span>
+          </div>
+          <button className="primary-button account-submit" onClick={() => onAuthenticated(pendingResult)}>
+            <Check size={17} />我已保存，进入应用
+          </button>
+        </section>
+      </div>
+    )
+  }
+
+  const insecure = serverUrl.trim().toLowerCase().startsWith('http://')
+  return (
+    <div className="account-gate">
+      <section className="account-brand-panel">
+        <div className="account-brand"><BrandMark /><strong>Codex Continuity</strong></div>
+        <div className="account-brand-copy">
+          <span>ACCOUNT SYNC</span>
+          <h1>登录同一账号，继续每一台设备上的工作。</h1>
+          <p>登录令牌与同步密钥自动保存在 Windows 凭据管理器，不再复制 API Token 或共享密钥。</p>
+          <div className="account-benefits">
+            <div><ShieldCheck /><span><strong>账号级加密</strong><small>服务端只保存密码封装后的同步密钥</small></span></div>
+            <div><Monitor /><span><strong>稳定设备身份</strong><small>使用 MAC 指纹识别设备，名称可随时修改</small></span></div>
+            <div><RefreshCw /><span><strong>自动续期</strong><small>短期访问令牌与可轮换刷新令牌</small></span></div>
+          </div>
+        </div>
+        <small>Codex Continuity v0.4.0</small>
+      </section>
+      <section className="account-form-panel">
+        <form className="account-card" onSubmit={submit}>
+          <div className="account-mobile-brand"><BrandMark /><strong>Codex Continuity</strong></div>
+          <div className="account-tabs" role="tablist" aria-label="账号操作">
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === 'login'}
+              className={mode === 'login' ? 'active' : ''}
+              onClick={() => { setMode('login'); setError('') }}
+            >
+              登录
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={mode === 'register'}
+              className={mode === 'register' ? 'active' : ''}
+              onClick={() => { setMode('register'); setError('') }}
+            >
+              注册
+            </button>
+          </div>
+          <div className="account-heading">
+            <span className="account-kicker">{mode === 'login' ? 'WELCOME BACK' : mode === 'recover' ? 'RECOVER ACCOUNT' : 'CREATE ACCOUNT'}</span>
+            <h2>{mode === 'login' ? '登录同步账号' : mode === 'recover' ? '使用恢复密钥重置密码' : initial.legacyAccountAvailable ? '升级现有设备' : '注册同步账号'}</h2>
+            <p>
+              {mode === 'login'
+                ? '在另一台设备使用相同用户名和密码即可读取加密会话。'
+                : mode === 'recover'
+                  ? '恢复密钥会验证账号归属，并用新密码重新保护原有同步密钥。'
+                : initial.legacyAccountAvailable
+                  ? '检测到现有 API Token，本次注册会保留原账号、会话和加密密钥。'
+                  : '同步密钥会在本机生成并使用密码保护。'}
+            </p>
+          </div>
+          <label className="account-field">
+            <span>用户名</span>
+            <div><UserRound size={17} /><input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder="3–32 位字母、数字或 ._-" required /></div>
+          </label>
+          {mode === 'register' ? (
+            <label className="account-field">
+              <span>显示名称</span>
+              <div><Monitor size={17} /><input value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="例如：陈鹏列" /></div>
+            </label>
+          ) : null}
+          <label className="account-field">
+            <span>{mode === 'recover' ? '新密码' : '密码'}</span>
+            <div><LockKeyhole size={17} /><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete={mode === 'login' ? 'current-password' : 'new-password'} placeholder="至少 10 位" required /></div>
+          </label>
+          {mode !== 'login' ? (
+            <label className="account-field">
+              <span>确认密码</span>
+              <div><ShieldCheck size={17} /><input type="password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="new-password" placeholder="再次输入密码" required /></div>
+            </label>
+          ) : null}
+          {mode === 'recover' ? (
+            <label className="account-field">
+              <span>恢复密钥</span>
+              <div><FileKey2 size={17} /><input value={recoveryKey} onChange={(event) => setRecoveryKey(event.target.value)} autoComplete="off" placeholder="注册时保存的 43 位恢复密钥" required /></div>
+            </label>
+          ) : null}
+          <details className="account-advanced">
+            <summary>高级：自定义服务端</summary>
+            <label className="account-field">
+              <span>服务端地址</span>
+              <div><Server size={17} /><input value={serverUrl} onChange={(event) => setServerUrl(event.target.value)} required /></div>
+            </label>
+          </details>
+          {insecure ? (
+            <div className="account-warning">
+              <CircleAlert size={17} />
+              <span>当前测试服务使用 HTTP，账号功能可用，但正式长期使用前必须升级为 HTTPS。</span>
+            </div>
+          ) : null}
+          {error ? <div className="account-error" role="alert">{error}</div> : null}
+          <button className="primary-button account-submit" type="submit" disabled={busy}>
+            {busy ? <Spinner /> : mode === 'login' ? <LogIn size={17} /> : mode === 'recover' ? <FileKey2 size={17} /> : <UserRound size={17} />}
+            {busy ? '正在处理…' : mode === 'login' ? '登录并连接此设备' : mode === 'recover' ? '重置密码并登录' : '注册并关联此设备'}
+          </button>
+          {mode === 'login' ? (
+            <button className="account-link-button" type="button" onClick={() => { setMode('recover'); setError('') }}>
+              忘记密码？使用恢复密钥
+            </button>
+          ) : mode === 'recover' ? (
+            <button className="account-link-button" type="button" onClick={() => { setMode('login'); setError('') }}>
+              返回登录
+            </button>
+          ) : null}
+        </form>
+      </section>
     </div>
   )
 }
@@ -794,20 +1030,20 @@ function SyncPage({ snapshot, busy, onSync, onAutoSync, onExportDiagnostics }: {
   )
 }
 
-function SettingsPage({ settings, projects, busy, onRun, onSaved, onToast }: {
+function SettingsPage({ auth, settings, projects, busy, onRun, onSaved, onLogout, onToast }: {
+  auth: AuthStatus
   settings: PublicSettings
   projects: SyncProjectOption[]
   busy: string
   onRun: <T>(key: string, action: () => Promise<T>, onSuccess?: (result: T) => void, refresh?: boolean) => Promise<T | undefined>
-  onSaved: (settings: PublicSettings, generatedKey?: string) => void
+  onSaved: (settings: PublicSettings) => void
+  onLogout: () => void
   onToast: (toast: Toast) => void
 }) {
   const [form, setForm] = useState<SaveSettingsRequest>({
     serverUrl: settings.serverUrl,
     root: settings.root,
     deviceName: settings.deviceName,
-    token: '',
-    encryptionKey: '',
     autoSync: settings.autoSync,
     launchAtStartup: settings.launchAtStartup,
     theme: settings.theme,
@@ -819,7 +1055,7 @@ function SettingsPage({ settings, projects, busy, onRun, onSaved, onToast }: {
   })
   const [connection, setConnection] = useState<number | null>(null)
   const [upload, setUpload] = useState<UploadTestResult | null>(null)
-  const [generatedKey, setGeneratedKey] = useState('')
+  const [recoveryKey, setRecoveryKey] = useState('')
   const selectedProjectSet = useMemo(
     () => new Set(form.selectedProjects.map((path) => path.toLowerCase())),
     [form.selectedProjects],
@@ -853,15 +1089,10 @@ function SettingsPage({ settings, projects, busy, onRun, onSaved, onToast }: {
     event.preventDefault()
     await onRun(
       'save',
-      () => desktopApi.saveSettings({
-        ...form,
-        token: form.token?.trim() || undefined,
-        encryptionKey: form.encryptionKey?.trim() || undefined,
-      }),
+      () => desktopApi.saveSettings(form),
       (result) => {
         setConnection(result.connection.latencyMs)
-        setGeneratedKey(result.generatedKey || '')
-        onSaved(result.settings, result.generatedKey)
+        onSaved(result.settings)
       },
     )
   }
@@ -898,32 +1129,31 @@ function SettingsPage({ settings, projects, busy, onRun, onSaved, onToast }: {
 
   return (
     <div className="page settings-page">
-      <PageHeader title="设置" subtitle="配置私有服务器、工作区目录和本机安全选项" />
+      <PageHeader title="设置" subtitle="管理当前账号、设备名称、工作区与同步范围" />
       <form className="settings-layout" onSubmit={submit}>
         <section className="panel settings-form">
-          <PanelHeader title="基础配置" />
+          <PanelHeader title="设备与工作区" />
+          <div className="account-settings-strip">
+            <span className="account-settings-avatar"><UserRound size={20} /></span>
+            <div><strong>{auth.displayName || auth.username}</strong><small>@{auth.username} · 同一账号可在多台设备登录</small></div>
+            <span className={`transport-pill ${auth.transportSecure ? 'secure' : 'warning'}`}>
+              {auth.transportSecure ? <ShieldCheck size={14} /> : <CircleAlert size={14} />}
+              {auth.transportSecure ? 'HTTPS' : 'HTTP 测试连接'}
+            </span>
+          </div>
           <div className="field-grid">
-            <Field label="服务端地址" hint="两台电脑都能访问">
-              <Input icon={<Server />} value={form.serverUrl} onChange={(value) => setForm({ ...form, serverUrl: value })} placeholder="https://continuity.example.com" required />
-            </Field>
             <Field label="设备名称" hint="用于区分来源设备">
               <Input icon={<Monitor />} value={form.deviceName} onChange={(value) => setForm({ ...form, deviceName: value })} placeholder="公司电脑" required />
             </Field>
             <Field label="工作区根目录" hint="目录内可以包含多个项目" wide>
               <Input icon={<FolderGit2 />} value={form.root} onChange={(value) => setForm({ ...form, root: value })} placeholder="D:\\code_CPL" required />
             </Field>
-            <Field label="客户端 API 令牌" hint={settings.hasToken ? '已安全保存；留空保持不变' : '从服务端管理页面创建'}>
-              <Input icon={<KeyRound />} type="password" value={form.token || ''} onChange={(value) => setForm({ ...form, token: value })} placeholder={settings.hasToken ? '•••••••• 已保存' : 'ct_...'} />
-            </Field>
-            <Field label="共享加密密钥" hint={settings.hasEncryptionKey ? '已安全保存；两台电脑必须一致' : '留空自动生成'}>
-              <Input icon={<ShieldCheck />} type="password" value={form.encryptionKey || ''} onChange={(value) => setForm({ ...form, encryptionKey: value })} placeholder={settings.hasEncryptionKey ? '•••••••• 已保存' : '留空自动生成'} />
-            </Field>
           </div>
-          {generatedKey ? (
+          {recoveryKey ? (
             <div className="generated-key">
-              <div><strong>新密钥仅显示这一次</strong><span>请复制到另一台电脑后再关闭。</span></div>
-              <code>{generatedKey}</code>
-              <CopyButton text={generatedKey} />
+              <div><strong>账号恢复密钥</strong><span>请离线保存；正常登录其他设备时无需使用。</span></div>
+              <code>{recoveryKey}</code>
+              <CopyButton text={recoveryKey} label="复制恢复密钥" />
             </div>
           ) : null}
           <section id="sync-scope-settings" className="sync-scope-settings" aria-labelledby="sync-scope-title">
@@ -1045,7 +1275,7 @@ function SettingsPage({ settings, projects, busy, onRun, onSaved, onToast }: {
           </section>
           <section className="panel validation-panel">
             <PanelHeader title="配置验证" />
-            <ValidationStep number={1} title="设备配置" state={settings.hasToken ? '已保存' : '待完成'} done={settings.hasToken} />
+            <ValidationStep number={1} title="账号登录" state={`@${auth.username}`} done={auth.authenticated} />
             <ValidationStep
               number={2}
               title="连接测试"
@@ -1063,7 +1293,19 @@ function SettingsPage({ settings, projects, busy, onRun, onSaved, onToast }: {
           </section>
           <section className="panel version-panel">
             <SecurityLine icon={<Activity />} title="客户端版本" value={`v${settings.version}`} />
+            <SecurityLine icon={<Monitor />} title="设备 ID" value={`${settings.deviceId.slice(0, 16)}…`} />
             <SecurityLine icon={<KeyRound />} title="凭据存储" value="Windows 凭据管理器" />
+            <button
+              className="secondary-button account-side-action"
+              type="button"
+              onClick={() => onRun('recovery-key', desktopApi.recoveryKey, setRecoveryKey, false)}
+              disabled={busy === 'recovery-key'}
+            >
+              {busy === 'recovery-key' ? <Spinner /> : <FileKey2 size={16} />}显示恢复密钥
+            </button>
+            <button className="secondary-button account-side-action danger-text" type="button" onClick={onLogout} disabled={busy === 'logout'}>
+              {busy === 'logout' ? <Spinner /> : <LogOut size={16} />}退出账号
+            </button>
           </section>
         </aside>
       </form>
