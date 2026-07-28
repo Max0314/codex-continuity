@@ -123,13 +123,14 @@ docker compose up -d --no-build --force-recreate
 将下列文件放在服务器仓库的 `release/` 目录，再重启 Compose：
 
 ```text
-codex-continuity_0.3.1_x64-setup.exe
-codex-continuity_0.3.1_x64_zh-CN.msi
+codex-continuity_0.3.1_windows-x64-setup.exe
+codex-continuity_0.3.1_windows-x64-offline-setup.exe
 codex-continuity_0.3.1_windows-x64-portable.zip
+desktop-release.json
 SHA256SUMS.txt
 ```
 
-管理网页“桌面客户端”会从 `/downloads/` 提供安装包。GitHub Release 工作流会自动构建这些 Windows 产物和 Linux 服务端离线镜像。
+管理网页“桌面客户端”会读取 `/downloads/desktop-release.json`，展示真实版本、体积和下载地址。标准版在缺少 WebView2 时从微软官方获取运行时；完整离线版不依赖安装时联网。GitHub Release 工作流会自动构建这些 Windows 产物和 Linux 服务端离线镜像。
 
 正式推广给同事前，必须配置组织代码签名证书和稳定更新通道。
 

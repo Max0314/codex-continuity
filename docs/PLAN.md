@@ -18,14 +18,14 @@
 
 ## 产品目标
 
-Codex Continuity 是独立于 Codex 的 Windows 常驻工具。它负责扫描固定工作根目录关联的 Codex 会话，在本机加密后同步到私有服务器，并让另一台电脑获得可靠的继续入口。
+Codex Continuity 是独立于 Codex 的 Windows 常驻工具。它负责扫描固定工作区根目录关联的 Codex 会话，在本机加密后同步到私有服务器，并让另一台电脑获得可靠的继续入口。
 
 服务端不访问 Codex、OpenAI、GitHub 或 GitLab。项目代码仍通过 Git 同步，Continuity 只同步会话快照、Git 状态摘要和必要的续接材料。
 
 ## v0.3.0 已完成
 
 - [x] 桌面端收敛为“会话 / 同步 / 设置”三层导航；
-- [x] 扫描 `~/.codex/sessions` 和 `session_index.jsonl`，按工作根目录关联会话；
+- [x] 扫描 `~/.codex/sessions` 和 `session_index.jsonl`，按工作区根目录关联会话；
 - [x] 会话按项目折叠分组，默认显示最近一周且每个项目先显示最近 4 条；
 - [x] 归档会话暂不扫描、不上传，历史服务端快照不自动删除；
 - [x] 会话搜索、状态筛选、详情联动和“在此设备继续”；

@@ -1,4 +1,4 @@
-import type { ApiToken, Device, Handoff, Overview, User } from './types'
+import type { ApiToken, DesktopReleaseManifest, Device, Handoff, Overview, User } from './types'
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`/api/v1${path}`, {
@@ -36,4 +36,12 @@ export const api = {
       body: JSON.stringify({ name }),
     }),
   deleteToken: (id: string) => request<void>(`/tokens/${id}`, { method: 'DELETE' }),
+  desktopRelease: async () => {
+    const response = await fetch('/downloads/desktop-release.json', {
+      credentials: 'same-origin',
+      cache: 'no-store',
+    })
+    if (!response.ok) throw new Error('服务器尚未发布桌面安装包清单')
+    return response.json() as Promise<DesktopReleaseManifest>
+  },
 }

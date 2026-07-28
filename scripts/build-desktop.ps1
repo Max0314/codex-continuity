@@ -1,6 +1,8 @@
 param(
     [switch]$SkipInstall,
-    [switch]$SkipBundle
+    [switch]$SkipBundle,
+    [ValidateSet('All', 'Standard', 'Offline')]
+    [string]$PackageMode = 'All'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -11,7 +13,12 @@ $releaseDir = Join-Path $projectRoot 'release'
 $goBin = Join-Path $projectRoot 'tools\go\bin'
 $bundleRoot = Join-Path $desktopDir 'src-tauri\target\release\bundle'
 $tauriConfigPath = Join-Path $desktopDir 'src-tauri\tauri.conf.json'
+$offlineConfigPath = 'src-tauri\tauri.offline.conf.json'
 $desktopVersion = (Get-Content -LiteralPath $tauriConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json).version
+$standardInstallerName = "codex-continuity_${desktopVersion}_windows-x64-setup.exe"
+$offlineInstallerName = "codex-continuity_${desktopVersion}_windows-x64-offline-setup.exe"
+$portableName = "codex-continuity_${desktopVersion}_windows-x64-portable.zip"
+$manifestName = 'desktop-release.json'
 $staleBundle = $null
 $cargoCommand = Get-Command cargo -ErrorAction SilentlyContinue
 $cargoExe = if ($cargoCommand) {
@@ -28,6 +35,55 @@ if (-not (Test-Path -LiteralPath $cargoExe)) {
 }
 New-Item -ItemType Directory -Force -Path $sidecarDir, $releaseDir | Out-Null
 
+function Copy-LatestNSISInstaller {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$DestinationName
+    )
+
+    $nsisDir = Join-Path $bundleRoot 'nsis'
+    $installer = Get-ChildItem -LiteralPath $nsisDir -Filter '*.exe' -File -ErrorAction SilentlyContinue |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+    if (-not $installer) {
+        throw "Tauri did not produce an NSIS installer in $nsisDir."
+    }
+    $destination = Join-Path $releaseDir $DestinationName
+    Copy-Item -LiteralPath $installer.FullName -Destination $destination -Force
+    return Get-Item -LiteralPath $destination
+}
+
+function New-ReleaseArtifact {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Id,
+        [Parameter(Mandatory = $true)]
+        [string]$Label,
+        [Parameter(Mandatory = $true)]
+        [string]$FileName,
+        [Parameter(Mandatory = $true)]
+        [string]$WebViewMode,
+        [bool]$Recommended = $false,
+        [bool]$RequiresInternetIfRuntimeMissing = $false
+    )
+
+    $path = Join-Path $releaseDir $FileName
+    if (-not (Test-Path -LiteralPath $path)) {
+        return $null
+    }
+    $file = Get-Item -LiteralPath $path
+    return [ordered]@{
+        id = $Id
+        label = $Label
+        fileName = $FileName
+        sizeBytes = $file.Length
+        sha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+        webViewMode = $WebViewMode
+        recommended = $Recommended
+        requiresInternetIfRuntimeMissing = $RequiresInternetIfRuntimeMissing
+    }
+}
+
 $env:CGO_ENABLED = '0'
 $env:GOOS = 'windows'
 $env:GOARCH = 'amd64'
@@ -41,8 +97,11 @@ try {
     if (-not $SkipInstall) {
         npm ci
     }
-    npm run build
     if ($SkipBundle) {
+        npm run build
+        if ($LASTEXITCODE -ne 0) {
+            throw "Desktop frontend build failed with exit code $LASTEXITCODE."
+        }
         & $cargoExe build --release --manifest-path 'src-tauri\Cargo.toml'
         if ($LASTEXITCODE -ne 0) {
             throw "Cargo release build failed with exit code $LASTEXITCODE."
@@ -52,9 +111,21 @@ try {
             $staleBundle = "$bundleRoot-stale-$(Get-Date -Format 'yyyyMMddHHmmss')"
             Move-Item -LiteralPath $bundleRoot -Destination $staleBundle
         }
-        npm run tauri build
-        if ($LASTEXITCODE -ne 0) {
-            throw "Tauri bundle build failed with exit code $LASTEXITCODE."
+
+        if ($PackageMode -in 'All', 'Standard') {
+            npm run tauri build
+            if ($LASTEXITCODE -ne 0) {
+                throw "Tauri standard installer build failed with exit code $LASTEXITCODE."
+            }
+            Copy-LatestNSISInstaller -DestinationName $standardInstallerName | Out-Null
+        }
+
+        if ($PackageMode -in 'All', 'Offline') {
+            npm run tauri build -- --config $offlineConfigPath
+            if ($LASTEXITCODE -ne 0) {
+                throw "Tauri offline installer build failed with exit code $LASTEXITCODE."
+            }
+            Copy-LatestNSISInstaller -DestinationName $offlineInstallerName | Out-Null
         }
     }
 } finally {
@@ -65,23 +136,55 @@ if ($staleBundle -and (Test-Path -LiteralPath $bundleRoot) -and (Test-Path -Lite
     Remove-Item -LiteralPath $staleBundle -Recurse -Force
 }
 
-if (Test-Path -LiteralPath $bundleRoot) {
-    $nsisInstaller = Get-ChildItem -LiteralPath (Join-Path $bundleRoot 'nsis') -Filter '*.exe' -File -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if ($nsisInstaller) {
-        Copy-Item -LiteralPath $nsisInstaller.FullName -Destination (Join-Path $releaseDir "codex-continuity_${desktopVersion}_x64-setup.exe") -Force
-    }
-    $msiInstaller = Get-ChildItem -LiteralPath (Join-Path $bundleRoot 'msi') -Filter '*.msi' -File -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if ($msiInstaller) {
-        Copy-Item -LiteralPath $msiInstaller.FullName -Destination (Join-Path $releaseDir "codex-continuity_${desktopVersion}_x64_zh-CN.msi") -Force
-    }
-}
 $desktopExe = Join-Path $desktopDir 'src-tauri\target\release\codex-continuity-desktop.exe'
 $sidecarExe = Join-Path $desktopDir 'src-tauri\target\release\continuity-core.exe'
 if ((Test-Path -LiteralPath $desktopExe) -and (Test-Path -LiteralPath $sidecarExe)) {
-    Compress-Archive -LiteralPath $desktopExe, $sidecarExe -DestinationPath (Join-Path $releaseDir "codex-continuity_${desktopVersion}_windows-x64-portable.zip") -CompressionLevel Optimal -Force
+    Compress-Archive -LiteralPath $desktopExe, $sidecarExe -DestinationPath (Join-Path $releaseDir $portableName) -CompressionLevel Optimal -Force
 }
+
+$releaseArtifacts = @()
+$standardArtifact = New-ReleaseArtifact `
+    -Id 'standard' `
+    -Label 'Standard installer' `
+    -FileName $standardInstallerName `
+    -WebViewMode 'official-download-if-missing' `
+    -Recommended $true `
+    -RequiresInternetIfRuntimeMissing $true
+if ($standardArtifact) {
+    $releaseArtifacts += $standardArtifact
+}
+$offlineArtifact = New-ReleaseArtifact `
+    -Id 'offline' `
+    -Label 'Full offline installer' `
+    -FileName $offlineInstallerName `
+    -WebViewMode 'bundled-offline' `
+    -Recommended $false `
+    -RequiresInternetIfRuntimeMissing $false
+if ($offlineArtifact) {
+    $releaseArtifacts += $offlineArtifact
+}
+$portableArtifact = New-ReleaseArtifact `
+    -Id 'portable' `
+    -Label 'Portable package' `
+    -FileName $portableName `
+    -WebViewMode 'system-required' `
+    -Recommended $false `
+    -RequiresInternetIfRuntimeMissing $false
+if ($portableArtifact) {
+    $releaseArtifacts += $portableArtifact
+}
+
+$releaseManifest = [ordered]@{
+    schemaVersion = 1
+    product = 'Codex Continuity'
+    version = $desktopVersion
+    generatedAt = [DateTime]::UtcNow.ToString('o')
+    platform = 'windows-x64'
+    artifacts = $releaseArtifacts
+}
+$releaseManifest |
+    ConvertTo-Json -Depth 5 |
+    Set-Content -LiteralPath (Join-Path $releaseDir $manifestName) -Encoding UTF8
 
 $checksumFiles = Get-ChildItem -LiteralPath $releaseDir -File |
     Where-Object { $_.Name -notin '.gitkeep', 'SHA256SUMS.txt' -and $_.Extension -ne '.stale' } |
@@ -92,4 +195,4 @@ $checksumLines = $checksumFiles | ForEach-Object {
 }
 Set-Content -Encoding ascii -LiteralPath (Join-Path $releaseDir 'SHA256SUMS.txt') -Value $checksumLines
 
-Write-Host "Desktop client build completed: $releaseDir"
+Write-Host "Desktop client build completed ($PackageMode): $releaseDir"

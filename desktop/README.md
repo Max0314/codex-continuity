@@ -4,7 +4,7 @@ Windows 桌面客户端采用 Tauri 2 + React + TypeScript，复用仓库中的 
 
 ## 用户能力
 
-- 可视化填写服务端地址、设备名称、固定工作根目录、API 令牌和共享加密密钥；
+- 可视化填写服务端地址、设备名称、固定工作区根目录、API 令牌和共享加密密钥；
 - 一键连通测试与 64 KB 加密上传测试；
 - 扫描固定根目录下的多个 Git 工作区和关联的 Codex 会话；
 - 后台自动同步、失败持久化队列与手动立即同步；
@@ -47,8 +47,16 @@ npm run dev
 
 产物复制到仓库的 `release/`：
 
-- NSIS 当前用户安装程序；
-- MSI 企业部署安装包；
-- 包含桌面程序和 Go sidecar 的便携包 ZIP。
+- `codex-continuity_<版本>_windows-x64-setup.exe`：标准安装版。优先使用 Windows 已有的 WebView2；缺少时由安装程序从微软官方获取；
+- `codex-continuity_<版本>_windows-x64-offline-setup.exe`：完整离线版，内置 WebView2 Evergreen Runtime；
+- `codex-continuity_<版本>_windows-x64-portable.zip`：包含桌面程序和 Go sidecar 的便携包；
+- `desktop-release.json`：供服务端下载页读取的版本、体积、下载地址和 SHA-256 清单。
+
+默认一次构建全部版本，也可以单独构建：
+
+```powershell
+.\scripts\build-desktop.ps1 -PackageMode Standard
+.\scripts\build-desktop.ps1 -PackageMode Offline
+```
 
 正式对外分发前必须配置 Windows 代码签名。升级通道、灰度发布与证书轮换属于商业发布阶段，不应使用未签名安装包直接大范围分发。

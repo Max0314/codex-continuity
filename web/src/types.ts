@@ -52,6 +52,32 @@ export interface Overview {
   devices: Device[]
 }
 
+export type DesktopReleaseArtifactId = 'standard' | 'offline' | 'portable'
+export type WebViewDistributionMode =
+  | 'official-download-if-missing'
+  | 'bundled-offline'
+  | 'system-required'
+
+export interface DesktopReleaseArtifact {
+  id: DesktopReleaseArtifactId
+  label: string
+  fileName: string
+  sizeBytes: number
+  sha256: string
+  webViewMode: WebViewDistributionMode
+  recommended: boolean
+  requiresInternetIfRuntimeMissing: boolean
+}
+
+export interface DesktopReleaseManifest {
+  schemaVersion: number
+  product: string
+  version: string
+  generatedAt: string
+  platform: 'windows-x64'
+  artifacts: DesktopReleaseArtifact[]
+}
+
 export type ThemeName = 'blue' | 'teal' | 'violet'
 export type PageName =
   | 'overview'

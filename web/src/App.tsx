@@ -6,6 +6,7 @@ import {
   ChevronRight,
   CircleUserRound,
   Clock3,
+  CloudDownload,
   Code2,
   Copy,
   Database,
@@ -18,6 +19,7 @@ import {
   LogOut,
   Menu,
   Monitor,
+  PackageCheck,
   Palette,
   Plus,
   RefreshCw,
@@ -30,11 +32,14 @@ import {
   TerminalSquare,
   Trash2,
   Users,
+  WifiOff,
   X,
 } from 'lucide-react'
 import { api } from './api'
 import type {
   ApiToken,
+  DesktopReleaseArtifact,
+  DesktopReleaseManifest,
   Device,
   Handoff,
   Overview,
@@ -184,7 +189,7 @@ function Login({
         <div className="login-brand-copy">
           <span className="eyebrow">CODEX CONTINUITY</span>
           <h1>让 Codex 会话在不同设备之间，安全延续。</h1>
-          <p>自动同步工作根目录关联的 Codex 会话快照。服务端只保存密文，不需要访问 Codex 或 OpenAI。</p>
+          <p>自动同步工作区根目录关联的 Codex 会话快照。服务端只保存密文，不需要访问 Codex 或 OpenAI。</p>
           <div className="login-feature-list">
             <Feature icon={<ShieldCheck />} title="端到端加密" text="AES-256-GCM 加密后再上传" />
             <Feature icon={<RefreshCw />} title="自动同步与离线队列" text="无需逐项目、逐对话手动发布" />
@@ -467,7 +472,7 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: PageName) => void }) 
           </Panel>
           <Panel title="快捷操作">
             <QuickAction icon={<KeyRound />} title="生成客户端令牌" text="为新电脑创建独立凭据" onClick={() => onNavigate('tokens')} />
-            <QuickAction icon={<Download />} title="下载 Windows 客户端" text="NSIS / MSI，无需命令行配置" onClick={() => onNavigate('downloads')} />
+            <QuickAction icon={<Download />} title="下载 Windows 客户端" text="标准版 / 完整离线版，无需命令行配置" onClick={() => onNavigate('downloads')} />
             <QuickAction icon={<Users />} title="邀请团队成员" text="每位成员的数据相互隔离" onClick={() => onNavigate('users')} />
           </Panel>
         </div>
@@ -660,19 +665,84 @@ function CreateTokenModal({ onClose, onCreated }: { onClose: () => void; onCreat
   )
 }
 
+function formatFileSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '大小未知'
+  const mib = bytes / 1024 / 1024
+  return mib >= 100 ? `${mib.toFixed(0)} MB` : `${mib.toFixed(1)} MB`
+}
+
+function DownloadEdition({
+  artifact,
+  icon,
+  title,
+  description,
+  details,
+  recommended,
+}: {
+  artifact?: DesktopReleaseArtifact
+  icon: ReactNode
+  title: string
+  description: string
+  details: string[]
+  recommended?: boolean
+}) {
+  return (
+    <article className={`download-edition ${recommended ? 'recommended' : ''}`}>
+      <div className="download-edition-heading">
+        <span className="download-edition-icon">{icon}</span>
+        <div>
+          <div className="download-edition-title">
+            <h3>{title}</h3>
+            {recommended && <span className="recommend-badge">推荐</span>}
+          </div>
+          <p>{description}</p>
+        </div>
+      </div>
+      <ul className="download-edition-details">
+        {details.map((detail) => <li key={detail}><Check size={15} />{detail}</li>)}
+      </ul>
+      <div className="download-edition-footer">
+        <span>
+          <strong>{artifact ? formatFileSize(artifact.sizeBytes) : '尚未发布'}</strong>
+          <small>{artifact ? 'Windows x64 · NSIS' : '等待服务器上传构建产物'}</small>
+        </span>
+        {artifact ? (
+          <a
+            className={recommended ? 'primary-button edition-download' : 'secondary-button edition-download'}
+            href={`/downloads/${encodeURIComponent(artifact.fileName)}`}
+            download
+          >
+            <Download size={17} /> 下载
+          </a>
+        ) : (
+          <span className="secondary-button edition-download is-disabled" aria-disabled="true">暂不可用</span>
+        )}
+      </div>
+    </article>
+  )
+}
+
 function DownloadsPage() {
   const [devices, setDevices] = useState<Device[]>([])
+  const [release, setRelease] = useState<DesktopReleaseManifest | null>(null)
+  const [releaseError, setReleaseError] = useState('')
 
   useEffect(() => {
     api.devices().then((result) => setDevices(result.devices)).catch(() => setDevices([]))
+    api.desktopRelease()
+      .then(setRelease)
+      .catch((error) => setReleaseError(error instanceof Error ? error.message : '安装包清单加载失败'))
   }, [])
 
-  const currentVersion = '0.3.1'
+  const currentVersion = release?.version ?? '0.3.1'
   const currentCount = devices.filter((device) => device.clientVersion === currentVersion).length
   const outdatedCount = devices.filter((device) => device.clientVersion && device.clientVersion !== currentVersion).length
+  const standardArtifact = release?.artifacts.find((artifact) => artifact.id === 'standard')
+  const offlineArtifact = release?.artifacts.find((artifact) => artifact.id === 'offline')
+  const portableArtifact = release?.artifacts.find((artifact) => artifact.id === 'portable')
   return (
     <>
-      <PageHeader eyebrow="管理" title="桌面客户端" description="统一分发 Windows 桌面程序，并查看团队设备的安装与版本状态" />
+      <PageHeader eyebrow="管理" title="桌面客户端" description="按电脑网络环境选择安装包；绝大多数 Windows 10 / 11 设备使用标准版即可" />
       <div className="client-release-grid">
         <Panel className="download-hero desktop-release-hero">
           <div className="download-product">
@@ -680,18 +750,45 @@ function DownloadsPage() {
             <div>
               <span className="eyebrow">WINDOWS 10 / 11 · X64</span>
               <h2>Codex Continuity 桌面版</h2>
-              <p>提供可视化配置、系统托盘、自动同步、离线队列、加密导入导出与跨设备续接，无需使用 PowerShell。</p>
+              <p>WebView2 是 Windows 共享运行环境，不会为每个应用重复安装。标准版优先使用电脑已有的运行时，只有缺少时才从 Microsoft 官方获取。</p>
             </div>
           </div>
-          <div className="desktop-download-actions">
-            <a className="primary-button download-button" href="/downloads/codex-continuity_0.3.1_x64-setup.exe">
-              <Download size={18} /> 下载安装程序
-            </a>
-            <a className="secondary-button" href="/downloads/codex-continuity_0.3.1_x64_zh-CN.msi">
-              下载 MSI
-            </a>
+          {releaseError && (
+            <div className="release-manifest-warning">
+              <WifiOff size={18} />
+              <span><strong>{releaseError}</strong><small>请管理员把新构建产物和 desktop-release.json 放入服务端下载目录。</small></span>
+            </div>
+          )}
+          <div className="download-edition-grid">
+            <DownloadEdition
+              artifact={standardArtifact}
+              icon={<CloudDownload />}
+              title="标准安装版"
+              description="适合日常办公电脑，安装包小，推荐优先下载。"
+              details={[
+                '已有 WebView2 时直接安装，不产生额外下载',
+                '缺少时由安装程序从 Microsoft 官方获取',
+                '后续客户端升级不重复携带完整运行时',
+              ]}
+              recommended
+            />
+            <DownloadEdition
+              artifact={offlineArtifact}
+              icon={<WifiOff />}
+              title="完整离线版"
+              description="适合断网、受限网络、Windows Server 或 LTSC 设备。"
+              details={[
+                '内置 WebView2 Evergreen 离线安装程序',
+                '安装过程不依赖 Microsoft 下载网络',
+                '文件较大，仅首次安装或特殊环境使用',
+              ]}
+            />
           </div>
-          <div className="download-meta"><span>版本 v{currentVersion}</span><span>NSIS / MSI</span><span>支持静默安装</span><span>内置离线 WebView2</span></div>
+          <div className="runtime-explainer">
+            <PackageCheck size={19} />
+            <span><strong>如何选择？</strong><small>先下载标准版；只有安装程序提示无法取得 WebView2，或者电脑完全离线时，再使用完整离线版。</small></span>
+          </div>
+          <div className="download-meta"><span>版本 v{currentVersion}</span><span>NSIS 当前用户安装</span><span>支持静默安装</span><span>WebView2 自动检测</span></div>
         </Panel>
         <Panel title="版本覆盖" className="release-status-card">
           <div className="release-metrics">
@@ -703,16 +800,20 @@ function DownloadsPage() {
         </Panel>
         <Panel title="安装与激活" className="desktop-onboarding">
           <ol className="step-list">
-            <li><span>1</span><div><strong>下载安装程序</strong><p>双击安装后自动打开主窗口，并在系统托盘保持运行。</p></div></li>
+            <li><span>1</span><div><strong>选择合适的安装版</strong><p>普通电脑使用标准版；断网或 Microsoft 下载受限时使用完整离线版。</p></div></li>
             <li><span>2</span><div><strong>创建客户端令牌</strong><p>在“API 令牌”页面创建凭据，复制到桌面客户端的基础配置。</p></div></li>
             <li><span>3</span><div><strong>完成两项测试</strong><p>依次执行“连接测试”和“加密上传测试”，通过后客户端会自动同步。</p></div></li>
           </ol>
         </Panel>
-        <Panel title="兼容与批量部署" className="deployment-options">
-          <div className="deployment-option"><Rocket size={18} /><span><strong>个人安装</strong><small>使用 NSIS 安装程序，当前用户无需管理员权限。</small></span></div>
-          <div className="deployment-option"><Laptop size={18} /><span><strong>企业批量安装</strong><small>通过 MSI、Intune 或 SCCM 静默分发到团队电脑。</small></span></div>
-          <div className="deployment-option"><TerminalSquare size={18} /><span><strong>命令行兼容</strong><small>保留 Go 核心程序，自动化脚本可继续使用。</small></span></div>
-          <a className="legacy-download" href="/downloads/continuity-windows-amd64.exe"><Download size={15} /> 下载旧版命令行核心 v0.1.0</a>
+        <Panel title="兼容与团队部署" className="deployment-options">
+          <div className="deployment-option"><Rocket size={18} /><span><strong>个人电脑</strong><small>标准版按当前用户安装，无需为每次升级重复下载 WebView2。</small></span></div>
+          <div className="deployment-option"><Laptop size={18} /><span><strong>公司电脑</strong><small>可由管理员统一部署一次 WebView2，再持续分发体积更小的标准版。</small></span></div>
+          <div className="deployment-option"><TerminalSquare size={18} /><span><strong>便携运行</strong><small>便携版不会安装 WebView2，目标电脑必须已有共享运行时。</small></span></div>
+          {portableArtifact && (
+            <a className="legacy-download" href={`/downloads/${encodeURIComponent(portableArtifact.fileName)}`} download>
+              <Download size={15} /> 下载便携版 · {formatFileSize(portableArtifact.sizeBytes)}
+            </a>
+          )}
         </Panel>
       </div>
     </>

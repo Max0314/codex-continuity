@@ -35,8 +35,9 @@ jobs:
           name: windows-desktop
           path: |
             release/*.exe
-            release/*.msi
             release/*.zip
+            release/*.json
+            release/SHA256SUMS.txt
           if-no-files-found: error
 
   release:

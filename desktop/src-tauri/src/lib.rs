@@ -984,7 +984,7 @@ fn activities_for(
             id: "ready".to_string(),
             kind: "scan".to_string(),
             title: "Codex Continuity 已就绪".to_string(),
-            detail: "完成配置后，会自动扫描工作根目录中的 Codex 会话".to_string(),
+            detail: "完成配置后，会自动扫描工作区根目录中的 Codex 会话".to_string(),
             tone: "info".to_string(),
             time: now_iso(),
         });
@@ -1239,7 +1239,7 @@ async fn save_settings(
     let server_url = normalized_url(&request.server_url)?;
     let root = PathBuf::from(request.root.trim());
     if !root.is_dir() {
-        return Err("工作根目录不存在，请选择有效目录".to_string());
+        return Err("工作区根目录不存在，请选择有效目录".to_string());
     }
     if request.device_name.trim().is_empty() {
         return Err("设备名称不能为空".to_string());

@@ -30,7 +30,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": ["nsis"],
     "publisher": "Neonet",
     "copyright": "Copyright © 2026 Neonet",
     "category": "DeveloperTool",
@@ -48,7 +48,7 @@
     ],
     "windows": {
       "webviewInstallMode": {
-        "type": "offlineInstaller",
+        "type": "downloadBootstrapper",
         "silent": true
       },
       "nsis": {

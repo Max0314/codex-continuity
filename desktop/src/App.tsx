@@ -612,7 +612,8 @@ function ConversationRow({ conversation, selected, tone, busy, onSelect, onConti
           onClick={(event) => { event.stopPropagation(); onContinue() }}
           disabled={busy}
         >
-          {busy ? <Spinner /> : <Play size={15} />}在此设备继续
+          {busy ? <Spinner /> : <Play size={15} />}
+          {conversation.continuationMode === 'native-local' ? '定位原任务' : '在此设备继续'}
         </button>
       </span>
     </div>
@@ -650,7 +651,8 @@ function ConversationDetail({ conversation, busy, onContinue, onExport }: {
       </div>
       <div className="detail-actions">
         <button className="primary-button wide" onClick={onContinue} disabled={busy}>
-          {busy ? <Spinner /> : <MessageSquareText size={17} />}在此设备继续
+          {busy ? <Spinner /> : <MessageSquareText size={17} />}
+          {conversation.continuationMode === 'native-local' ? '定位原任务' : '在此设备继续'}
         </button>
         <button className="secondary-button square" onClick={onExport} aria-label="导出加密归档"><Download size={17} /></button>
       </div>
@@ -829,7 +831,7 @@ function SettingsPage({ settings, projects, busy, onRun, onSaved, onToast }: {
 
   return (
     <div className="page settings-page">
-      <PageHeader title="设置" subtitle="配置私有服务器、工作目录和本机安全选项" />
+      <PageHeader title="设置" subtitle="配置私有服务器、工作区目录和本机安全选项" />
       <form className="settings-layout" onSubmit={submit}>
         <section className="panel settings-form">
           <PanelHeader title="基础配置" />
@@ -840,7 +842,7 @@ function SettingsPage({ settings, projects, busy, onRun, onSaved, onToast }: {
             <Field label="设备名称" hint="用于区分来源设备">
               <Input icon={<Monitor />} value={form.deviceName} onChange={(value) => setForm({ ...form, deviceName: value })} placeholder="公司电脑" required />
             </Field>
-            <Field label="工作根目录" hint="目录内可以包含多个项目" wide>
+            <Field label="工作区根目录" hint="目录内可以包含多个项目" wide>
               <Input icon={<FolderGit2 />} value={form.root} onChange={(value) => setForm({ ...form, root: value })} placeholder="D:\\code_CPL" required />
             </Field>
             <Field label="客户端 API 令牌" hint={settings.hasToken ? '已安全保存；留空保持不变' : '从服务端管理页面创建'}>
@@ -948,7 +950,7 @@ function SettingsPage({ settings, projects, busy, onRun, onSaved, onToast }: {
           </div>
           <div className="form-actions">
             <button className="primary-button" type="submit" disabled={busy === 'save'}>
-              {busy === 'save' ? <Spinner /> : <Check size={17} />}保存并验证
+              {busy === 'save' ? <Spinner /> : <Check size={17} />}保存配置
             </button>
           </div>
         </section>
@@ -1004,7 +1006,10 @@ function ContinuationDialog({ result, onClose }: { result: ContinueResult; onClo
       <section className="modal" role="dialog" aria-modal="true" aria-labelledby="continuation-title">
         <div className="modal-header">
           <span className="success-mark"><Check size={20} /></span>
-          <div><h2 id="continuation-title">已准备在此设备继续</h2><p>{result.message}</p></div>
+          <div>
+            <h2 id="continuation-title">{result.mode === 'native-local' ? '已定位本机会话' : '已准备在此设备继续'}</h2>
+            <p>{result.message}</p>
+          </div>
           <button className="icon-button" onClick={onClose} aria-label="关闭"><X size={19} /></button>
         </div>
         <div className="modal-body">

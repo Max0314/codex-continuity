@@ -59,7 +59,7 @@ func initCommand(args []string) error {
 	flags := flag.NewFlagSet("init", flag.ContinueOnError)
 	serverURL := flags.String("server", "", "服务端地址")
 	token := flags.String("token", "", "管理端创建的客户端 API 令牌")
-	root := flags.String("root", `D:\code_CPL`, "固定工作根目录")
+	root := flags.String("root", `D:\code_CPL`, "固定工作区根目录")
 	device := flags.String("device", defaultDeviceName(), "设备名称")
 	encryptionKey := flags.String("key", "", "两台电脑共享的加密密钥；留空时自动生成")
 	configPath := flags.String("config", "", "自定义配置文件路径")
@@ -104,7 +104,7 @@ func initCommand(args []string) error {
 	if err := client.SaveConfig(*configPath, cfg); err != nil {
 		return err
 	}
-	fmt.Printf("设备已注册：%s\n工作根目录：%s\n", cfg.DeviceName, cfg.Root)
+	fmt.Printf("设备已注册：%s\n工作区根目录：%s\n", cfg.DeviceName, cfg.Root)
 	if generated {
 		fmt.Printf("\n加密密钥（仅显示这一次，请安全复制到另一台电脑）：\n%s\n", cfg.EncryptionKey)
 	}
@@ -119,7 +119,7 @@ func statusCommand(args []string) error {
 	if err := client.NewAPI(cfg).Health(); err != nil {
 		return err
 	}
-	fmt.Printf("服务端可用：%s\n设备：%s\n工作根目录：%s\n", cfg.ServerURL, cfg.DeviceName, cfg.Root)
+	fmt.Printf("服务端可用：%s\n设备：%s\n工作区根目录：%s\n", cfg.ServerURL, cfg.DeviceName, cfg.Root)
 	return nil
 }
 
@@ -427,7 +427,7 @@ func takeoverCommand(args []string) error {
 	flags := flag.NewFlagSet("takeover", flag.ContinueOnError)
 	configPath := flags.String("config", "", "配置文件路径")
 	id := flags.String("id", "", "交接 ID；留空接管最新一份")
-	output := flags.String("output", "", "解压目录；默认放在工作根目录的 .codex-continuity/handoffs 下")
+	output := flags.String("output", "", "解压目录；默认放在工作区根目录的 .codex-continuity/handoffs 下")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -544,6 +544,6 @@ func usage() {
   continuity list
   continuity takeover [--id HANDOFF_ID]
 
-publish 会一次扫描整个工作根目录，不需要逐项目或逐 Codex 任务操作。
+publish 会一次扫描整个工作区根目录，不需要逐项目或逐 Codex 任务操作。
 `)
 }

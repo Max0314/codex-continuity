@@ -109,10 +109,13 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #fff;
+  color: #cfd3da;
+  border: 1px solid rgba(255, 255, 255, .1);
   border-radius: 13px;
-  background: linear-gradient(145deg, var(--primary-400), var(--primary-700));
-  box-shadow: 0 8px 18px rgba(var(--primary-rgb), .25);
+  background: linear-gradient(145deg, #3a3f47 0%, #20242a 46%, #090b0e 100%);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, .09),
+    0 8px 18px rgba(15, 23, 42, .26);
 }
 
 .topbar-actions {
