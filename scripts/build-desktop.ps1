@@ -182,9 +182,13 @@ $releaseManifest = [ordered]@{
     platform = 'windows-x64'
     artifacts = $releaseArtifacts
 }
-$releaseManifest |
-    ConvertTo-Json -Depth 5 |
-    Set-Content -LiteralPath (Join-Path $releaseDir $manifestName) -Encoding UTF8
+$manifestJson = $releaseManifest | ConvertTo-Json -Depth 5
+$utf8WithoutBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText(
+    (Join-Path $releaseDir $manifestName),
+    $manifestJson,
+    $utf8WithoutBom
+)
 
 $checksumFiles = Get-ChildItem -LiteralPath $releaseDir -File |
     Where-Object { $_.Name -notin '.gitkeep', 'SHA256SUMS.txt' -and $_.Extension -ne '.stale' } |
