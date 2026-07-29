@@ -381,7 +381,7 @@ function Sidebar({
         </div>
         <div className="version-row">
           <span>版本</span>
-          <span>v0.4.1</span>
+          <span>v0.4.2</span>
         </div>
       </div>
     </aside>
@@ -733,7 +733,7 @@ function DownloadsPage() {
       .catch((error) => setReleaseError(error instanceof Error ? error.message : '安装包清单加载失败'))
   }, [])
 
-  const currentVersion = release?.version ?? '0.4.1'
+  const currentVersion = release?.version ?? '0.4.2'
   const currentCount = devices.filter((device) => device.clientVersion === currentVersion).length
   const outdatedCount = devices.filter((device) => device.clientVersion && device.clientVersion !== currentVersion).length
   const standardArtifact = release?.artifacts.find((artifact) => artifact.id === 'standard')

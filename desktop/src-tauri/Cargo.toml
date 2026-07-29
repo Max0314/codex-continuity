@@ -1,6 +1,6 @@
 [package]
 name = "codex-continuity-desktop"
-version = "0.4.1"
+version = "0.4.2"
 description = "Codex Continuity Windows desktop client"
 authors = ["Codex Continuity Contributors"]
 edition = "2021"
@@ -39,3 +39,11 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-window-state = "2"
 tempfile = "3"
 tokio = { version = "1", features = ["sync", "time"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }

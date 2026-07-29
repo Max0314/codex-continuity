@@ -34,7 +34,7 @@ let currentSettings: PublicSettings = {
   maxBundleMiB: 500,
   hasToken: true,
   hasEncryptionKey: true,
-  version: '0.4.1',
+  version: '0.4.2',
 }
 
 let mockAuthStatus: AuthStatus = {

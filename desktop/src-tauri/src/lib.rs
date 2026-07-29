@@ -15,7 +15,6 @@ use std::{
     fs,
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
-    process::Command,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };
@@ -618,51 +617,131 @@ fn normalized_mac(value: &str) -> Option<String> {
     }
 }
 
-fn first_mac_from_output(value: &str) -> Option<String> {
-    value
-        .split(|character: char| {
-            character == ',' || character == '"' || character.is_ascii_whitespace()
-        })
-        .find_map(normalized_mac)
+fn mac_from_bytes(value: &[u8]) -> Option<String> {
+    if value.len() != 6
+        || value.iter().all(|byte| *byte == 0)
+        || value.iter().all(|byte| *byte == 0xff)
+    {
+        return None;
+    }
+    normalized_mac(
+        &value
+            .iter()
+            .map(|byte| format!("{byte:02X}"))
+            .collect::<String>(),
+    )
 }
 
-fn hidden_command(program: &str) -> Command {
-    let mut command = Command::new(program);
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        command.creation_flags(CREATE_NO_WINDOW);
+#[cfg(target_os = "windows")]
+fn native_primary_mac_address() -> Result<String, String> {
+    use windows_sys::Win32::{
+        Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS},
+        NetworkManagement::IpHelper::{
+            GetAdaptersAddresses, GetIfEntry2, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
+            GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_UNICAST, IP_ADAPTER_ADDRESSES_LH, MIB_IF_ROW2,
+        },
+        Networking::WinSock::AF_UNSPEC,
+    };
+
+    const HARDWARE_INTERFACE_FLAG: u8 = 0x01;
+    let flags = GAA_FLAG_SKIP_ANYCAST
+        | GAA_FLAG_SKIP_MULTICAST
+        | GAA_FLAG_SKIP_DNS_SERVER
+        | GAA_FLAG_SKIP_UNICAST;
+    let mut buffer_size = 0u32;
+    let initial_status = unsafe {
+        GetAdaptersAddresses(
+            AF_UNSPEC as u32,
+            flags,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            &mut buffer_size,
+        )
+    };
+    if initial_status != ERROR_BUFFER_OVERFLOW || buffer_size == 0 {
+        return Err(format!(
+            "Windows 无法枚举网络适配器（错误代码 {initial_status}）"
+        ));
     }
-    command
+
+    for _ in 0..2 {
+        let word_count = (buffer_size as usize).div_ceil(std::mem::size_of::<u64>());
+        let mut buffer = vec![0u64; word_count];
+        let mut actual_size = buffer_size;
+        let first_adapter = buffer.as_mut_ptr().cast::<IP_ADAPTER_ADDRESSES_LH>();
+        let status = unsafe {
+            GetAdaptersAddresses(
+                AF_UNSPEC as u32,
+                flags,
+                std::ptr::null(),
+                first_adapter,
+                &mut actual_size,
+            )
+        };
+        if status == ERROR_BUFFER_OVERFLOW {
+            buffer_size = actual_size;
+            continue;
+        }
+        if status != ERROR_SUCCESS {
+            return Err(format!("Windows 无法读取网络适配器（错误代码 {status}）"));
+        }
+
+        let mut hardware_candidates = Vec::<(u32, String)>::new();
+        let mut fallback_candidates = Vec::<(u32, String)>::new();
+        let mut current = first_adapter;
+        while !current.is_null() {
+            let adapter = unsafe { &*current };
+            let mut row = MIB_IF_ROW2::default();
+            row.InterfaceLuid = adapter.Luid;
+            let row_status = unsafe { GetIfEntry2(&mut row) };
+            if row_status == ERROR_SUCCESS {
+                let length =
+                    (row.PhysicalAddressLength as usize).min(row.PermanentPhysicalAddress.len());
+                let permanent_mac = mac_from_bytes(&row.PermanentPhysicalAddress[..length])
+                    .or_else(|| mac_from_bytes(&row.PhysicalAddress[..length]));
+                if let Some(mac) = permanent_mac {
+                    let candidate = (row.InterfaceIndex, mac);
+                    if row.InterfaceAndOperStatusFlags._bitfield & HARDWARE_INTERFACE_FLAG != 0 {
+                        hardware_candidates.push(candidate);
+                    } else {
+                        fallback_candidates.push(candidate);
+                    }
+                }
+            } else {
+                let length =
+                    (adapter.PhysicalAddressLength as usize).min(adapter.PhysicalAddress.len());
+                if let Some(mac) = mac_from_bytes(&adapter.PhysicalAddress[..length]) {
+                    fallback_candidates
+                        .push((unsafe { adapter.Anonymous1.Anonymous.IfIndex }, mac));
+                }
+            }
+            current = adapter.Next;
+        }
+
+        hardware_candidates.sort_unstable_by_key(|candidate| candidate.0);
+        fallback_candidates.sort_unstable_by_key(|candidate| candidate.0);
+        if let Some((_, mac)) = hardware_candidates
+            .into_iter()
+            .next()
+            .or_else(|| fallback_candidates.into_iter().next())
+        {
+            return Ok(mac);
+        }
+        return Err("没有找到包含有效 MAC 地址的 Windows 网络适配器".to_string());
+    }
+
+    Err("Windows 网络适配器列表在读取时持续变化，请重试".to_string())
 }
 
 fn primary_mac_address() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
-        let route_script = "Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object MacAddress | Sort-Object InterfaceIndex | Select-Object -First 1 -ExpandProperty MacAddress";
-        if let Ok(output) = hidden_command("powershell")
-            .args(["-NoProfile", "-NonInteractive", "-Command", route_script])
-            .output()
-        {
-            if output.status.success() {
-                if let Some(mac) = first_mac_from_output(&String::from_utf8_lossy(&output.stdout)) {
-                    return Ok(mac);
-                }
-            }
-        }
-        if let Ok(output) = hidden_command("getmac")
-            .args(["/fo", "csv", "/nh"])
-            .output()
-        {
-            if output.status.success() {
-                if let Some(mac) = first_mac_from_output(&String::from_utf8_lossy(&output.stdout)) {
-                    return Ok(mac);
-                }
-            }
-        }
+        return native_primary_mac_address();
     }
-    Err("无法读取可用网卡的 MAC 地址，暂时不能注册此设备".to_string())
+    #[cfg(not(target_os = "windows"))]
+    {
+        Err("当前平台暂不支持基于 MAC 地址识别设备".to_string())
+    }
 }
 
 fn mac_device_id(user_id: &str, mac: &str) -> String {
@@ -889,7 +968,14 @@ async fn finish_account_login(
     settings.server_url = server_url;
     settings.device_id = device_id;
     write_settings_file(app, &settings)?;
-    let status = auth_status_for(&settings);
+    let status = AuthStatus {
+        authenticated: true,
+        username: session.user.username.clone(),
+        display_name: session.user.display_name.clone(),
+        server_url: settings.server_url.clone(),
+        legacy_account_available: false,
+        transport_secure: session.transport_secure,
+    };
     Ok(AuthActionResult {
         message: if status.transport_secure {
             "账号已登录，本机同步密钥已自动解锁".to_string()
@@ -2512,5 +2598,19 @@ mod tests {
         assert_eq!(first.len(), 68);
         assert!(!valid_mac_device_id("mac_short"));
         assert!(!valid_mac_device_id(&format!("mac_{}", "z".repeat(64))));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn reads_primary_mac_through_native_windows_api_without_long_wait() {
+        let started = Instant::now();
+        let mac = primary_mac_address().unwrap();
+        assert_eq!(mac.len(), 12);
+        assert!(mac.chars().all(|character| character.is_ascii_hexdigit()));
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "native MAC lookup took {:?}",
+            started.elapsed()
+        );
     }
 }

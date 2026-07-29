@@ -569,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "codex-continuity-desktop"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -593,6 +593,7 @@ dependencies = [
  "tauri-plugin-window-state",
  "tempfile",
  "tokio",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

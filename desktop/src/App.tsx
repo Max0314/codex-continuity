@@ -352,6 +352,7 @@ function AccountGate({
   const [confirmation, setConfirmation] = useState('')
   const [recoveryKey, setRecoveryKey] = useState('')
   const [busy, setBusy] = useState(false)
+  const [busyMessage, setBusyMessage] = useState('正在处理…')
   const [error, setError] = useState('')
   const [pendingResult, setPendingResult] = useState<AuthActionResult | null>(null)
 
@@ -366,7 +367,22 @@ function AccountGate({
       setError('密码至少需要 10 位')
       return
     }
+    setBusyMessage(
+      mode === 'login'
+        ? '正在验证账号…'
+        : mode === 'recover'
+          ? '正在恢复账号…'
+          : '正在安全创建账号…',
+    )
     setBusy(true)
+    const devicePhaseTimer = window.setTimeout(
+      () => setBusyMessage('正在识别并关联此设备…'),
+      1_500,
+    )
+    const slowPhaseTimer = window.setTimeout(
+      () => setBusyMessage('仍在安全处理，请勿重复提交…'),
+      8_000,
+    )
     try {
       const result = mode === 'login'
         ? await desktopApi.loginAccount({ serverUrl, username, password })
@@ -386,6 +402,8 @@ function AccountGate({
     } catch (requestError) {
       setError(errorMessage(requestError))
     } finally {
+      window.clearTimeout(devicePhaseTimer)
+      window.clearTimeout(slowPhaseTimer)
       setBusy(false)
     }
   }
@@ -431,7 +449,7 @@ function AccountGate({
             <div><RefreshCw /><span><strong>自动续期</strong><small>短期访问令牌与可轮换刷新令牌</small></span></div>
           </div>
         </div>
-        <small>Codex Continuity v0.4.1</small>
+        <small>Codex Continuity v0.4.2</small>
       </section>
       <section className="account-form-panel">
         <form className="account-card" onSubmit={submit}>
@@ -511,7 +529,7 @@ function AccountGate({
           {error ? <div className="account-error" role="alert">{error}</div> : null}
           <button className="primary-button account-submit" type="submit" disabled={busy}>
             {busy ? <Spinner /> : mode === 'login' ? <LogIn size={17} /> : mode === 'recover' ? <FileKey2 size={17} /> : <UserRound size={17} />}
-            {busy ? '正在处理…' : mode === 'login' ? '登录并连接此设备' : mode === 'recover' ? '重置密码并登录' : '注册并关联此设备'}
+            {busy ? busyMessage : mode === 'login' ? '登录并连接此设备' : mode === 'recover' ? '重置密码并登录' : '注册并关联此设备'}
           </button>
           {mode === 'login' ? (
             <button className="account-link-button" type="button" onClick={() => { setMode('recover'); setError('') }}>
