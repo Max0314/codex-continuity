@@ -127,9 +127,9 @@ docker compose up -d --no-build --force-recreate
 将下列文件放在服务器仓库的 `release/` 目录，再重启 Compose：
 
 ```text
-codex-continuity_0.4.0_windows-x64-setup.exe
-codex-continuity_0.4.0_windows-x64-offline-setup.exe
-codex-continuity_0.4.0_windows-x64-portable.zip
+codex-continuity_0.4.1_windows-x64-setup.exe
+codex-continuity_0.4.1_windows-x64-offline-setup.exe
+codex-continuity_0.4.1_windows-x64-portable.zip
 desktop-release.json
 SHA256SUMS.txt
 ```

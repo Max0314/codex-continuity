@@ -626,11 +626,22 @@ fn first_mac_from_output(value: &str) -> Option<String> {
         .find_map(normalized_mac)
 }
 
+fn hidden_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+    command
+}
+
 fn primary_mac_address() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
         let route_script = "Get-NetAdapter -Physical -ErrorAction SilentlyContinue | Where-Object MacAddress | Sort-Object InterfaceIndex | Select-Object -First 1 -ExpandProperty MacAddress";
-        if let Ok(output) = Command::new("powershell")
+        if let Ok(output) = hidden_command("powershell")
             .args(["-NoProfile", "-NonInteractive", "-Command", route_script])
             .output()
         {
@@ -640,7 +651,10 @@ fn primary_mac_address() -> Result<String, String> {
                 }
             }
         }
-        if let Ok(output) = Command::new("getmac").args(["/fo", "csv", "/nh"]).output() {
+        if let Ok(output) = hidden_command("getmac")
+            .args(["/fo", "csv", "/nh"])
+            .output()
+        {
             if output.status.success() {
                 if let Some(mac) = first_mac_from_output(&String::from_utf8_lossy(&output.stdout)) {
                     return Ok(mac);
@@ -654,6 +668,14 @@ fn primary_mac_address() -> Result<String, String> {
 fn mac_device_id(user_id: &str, mac: &str) -> String {
     let digest = Sha256::digest(format!("{}\0{}", user_id.trim(), mac.trim()).as_bytes());
     format!("mac_{digest:x}")
+}
+
+fn valid_mac_device_id(value: &str) -> bool {
+    value.len() == 68
+        && value.starts_with("mac_")
+        && value[4..]
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
 }
 
 fn public_settings(settings: &SettingsFile) -> PublicSettings {
@@ -746,6 +768,24 @@ async fn parse_auth_response(response: reqwest::Response) -> Result<ClientAuthEn
     serde_json::from_str(&body).map_err(|error| format!("账号登录响应无效：{error}"))
 }
 
+async fn request_account_login(
+    client: &reqwest::Client,
+    server_url: &str,
+    username: &str,
+    password: &str,
+) -> Result<ClientAuthEnvelope, String> {
+    let response = client
+        .post(format!("{server_url}/api/v1/client/auth/login"))
+        .json(&json!({
+            "username": username.trim(),
+            "password": password
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("登录账号失败：{error}"))?;
+    parse_auth_response(response).await
+}
+
 async fn ensure_access_token(settings: &SettingsFile) -> Result<String, String> {
     let mut session = load_auth_session().ok_or_else(|| "请先登录账号".to_string())?;
     let still_valid = DateTime::parse_from_rfc3339(&session.access_expires_at)
@@ -779,8 +819,17 @@ async fn register_current_device(
     access_token: &str,
     user_id: &str,
 ) -> Result<String, String> {
-    let mac = primary_mac_address()?;
-    let device_id = mac_device_id(user_id, &mac);
+    let cached_device_id = load_auth_session()
+        .filter(|session| session.user.id == user_id)
+        .map(|_| settings.device_id.as_str())
+        .filter(|value| valid_mac_device_id(value));
+    let device_id = match cached_device_id {
+        Some(value) => value.to_string(),
+        None => {
+            let mac = primary_mac_address()?;
+            mac_device_id(user_id, &mac)
+        }
+    };
     let response = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -1630,7 +1679,6 @@ async fn register_account(
     request: RegisterAccountRequest,
 ) -> Result<AuthActionResult, String> {
     let server_url = normalized_url(&request.server_url)?;
-    check_connection(&server_url).await?;
     let existing_key = read_secret("encryption-key")
         .and_then(|value| STANDARD_NO_PAD.decode(value.as_bytes()).ok())
         .filter(|value| value.len() == 32);
@@ -1647,10 +1695,11 @@ async fn register_account(
     } else {
         String::new()
     };
-    let response = reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
-        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    let response = client
         .post(format!("{server_url}/api/v1/client/auth/register"))
         .json(&json!({
             "username": request.username.trim(),
@@ -1664,17 +1713,37 @@ async fn register_account(
         .send()
         .await
         .map_err(|error| format!("注册账号失败：{error}"))?;
-    let envelope = parse_auth_response(response).await?;
+    let response_status = response.status();
+    let response_body = response.text().await.unwrap_or_default();
+    let mut resumed_registration = false;
+    let envelope = if response_status.is_success() {
+        serde_json::from_str::<ClientAuthEnvelope>(&response_body)
+            .map_err(|error| format!("账号注册响应无效：{error}"))?
+    } else {
+        let register_error = response_error(response_status, &response_body);
+        if legacy_token.is_empty() || !register_error.contains("现有客户端令牌无效") {
+            return Err(register_error);
+        }
+        resumed_registration = true;
+        request_account_login(&client, &server_url, &request.username, &request.password).await?
+    };
+    let verified_account_key = if resumed_registration {
+        unwrap_account_key(&request.password, &envelope.key_salt, &envelope.wrapped_key)?
+    } else {
+        account_key.clone()
+    };
     let mut result = finish_account_login(
         &app,
         server_url,
         &request.password,
         envelope,
-        Some(account_key.clone()),
+        Some(verified_account_key.clone()),
     )
     .await?;
-    result.recovery_key = Some(STANDARD_NO_PAD.encode(account_key));
-    if generated {
+    result.recovery_key = Some(STANDARD_NO_PAD.encode(verified_account_key));
+    if resumed_registration {
+        result.message = "账号注册已完成，本机设备关联已恢复；请保存恢复密钥".to_string();
+    } else if generated {
         result.message =
             "账号已创建并登录；请立即保存恢复密钥，其他设备无需手工复制同步密钥".to_string();
     } else {
@@ -1689,20 +1758,12 @@ async fn login_account(
     request: LoginAccountRequest,
 ) -> Result<AuthActionResult, String> {
     let server_url = normalized_url(&request.server_url)?;
-    check_connection(&server_url).await?;
-    let response = reqwest::Client::builder()
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
-        .map_err(|error| error.to_string())?
-        .post(format!("{server_url}/api/v1/client/auth/login"))
-        .json(&json!({
-            "username": request.username.trim(),
-            "password": request.password
-        }))
-        .send()
-        .await
-        .map_err(|error| format!("登录账号失败：{error}"))?;
-    let envelope = parse_auth_response(response).await?;
+        .map_err(|error| error.to_string())?;
+    let envelope =
+        request_account_login(&client, &server_url, &request.username, &request.password).await?;
     finish_account_login(&app, server_url, &request.password, envelope, None).await
 }
 
@@ -1712,7 +1773,6 @@ async fn recover_account(
     request: RecoverAccountRequest,
 ) -> Result<AuthActionResult, String> {
     let server_url = normalized_url(&request.server_url)?;
-    check_connection(&server_url).await?;
     let account_key = STANDARD_NO_PAD
         .decode(request.recovery_key.trim().as_bytes())
         .map_err(|_| "恢复密钥格式无效".to_string())?;
@@ -2445,9 +2505,12 @@ mod tests {
             Some("AABBCCDDEEFF")
         );
         let first = mac_device_id("user-a", "AABBCCDDEEFF");
+        assert!(valid_mac_device_id(&first));
         assert_eq!(first, mac_device_id("user-a", "AABBCCDDEEFF"));
         assert_ne!(first, mac_device_id("user-b", "AABBCCDDEEFF"));
         assert!(first.starts_with("mac_"));
         assert_eq!(first.len(), 68);
+        assert!(!valid_mac_device_id("mac_short"));
+        assert!(!valid_mac_device_id(&format!("mac_{}", "z".repeat(64))));
     }
 }

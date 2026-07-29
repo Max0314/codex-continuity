@@ -431,7 +431,7 @@ function AccountGate({
             <div><RefreshCw /><span><strong>自动续期</strong><small>短期访问令牌与可轮换刷新令牌</small></span></div>
           </div>
         </div>
-        <small>Codex Continuity v0.4.0</small>
+        <small>Codex Continuity v0.4.1</small>
       </section>
       <section className="account-form-panel">
         <form className="account-card" onSubmit={submit}>

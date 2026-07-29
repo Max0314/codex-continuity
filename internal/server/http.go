@@ -378,6 +378,12 @@ func (s *HTTPServer) registerDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := s.store.UpsertDevice(currentUser(r).ID, input)
 	if err != nil {
+		if errors.Is(err, ErrDeviceConflict) || errors.Is(err, ErrDeviceNotOwned) {
+			message := strings.TrimPrefix(err.Error(), ErrDeviceConflict.Error()+"：")
+			message = strings.TrimPrefix(message, ErrDeviceNotOwned.Error()+"：")
+			writeError(w, http.StatusConflict, message)
+			return
+		}
 		s.internalError(w, err)
 		return
 	}

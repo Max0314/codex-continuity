@@ -107,6 +107,46 @@ func TestLoginAndClientHandoffFlow(t *testing.T) {
 		t.Fatalf("unexpected client registration: status=%d payload=%#v", registerResponse.StatusCode, clientAuth)
 	}
 
+	retryRegisterRequest, _ := http.NewRequest(
+		http.MethodPost,
+		server.URL+"/api/v1/client/auth/register",
+		strings.NewReader(fmt.Sprintf(`{
+		  "username":"cpl","displayName":"测试管理员","password":"a-new-strong-password",
+		  "keySalt":"retry-salt","wrappedKey":"retry-wrapped-key",
+		  "recoveryKeyHash":%q,"legacyToken":%q
+		}`, strings.Repeat("b", 64), tokenPayload.Secret)),
+	)
+	retryRegisterRequest.Header.Set("Content-Type", "application/json")
+	retryRegisterResponse, err := http.DefaultClient.Do(retryRegisterRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer retryRegisterResponse.Body.Close()
+	var retriedClientAuth struct {
+		User         model.User `json:"user"`
+		AccessToken  string     `json:"accessToken"`
+		RefreshToken string     `json:"refreshToken"`
+		KeySalt      string     `json:"keySalt"`
+		WrappedKey   string     `json:"wrappedKey"`
+	}
+	if err := json.NewDecoder(retryRegisterResponse.Body).Decode(&retriedClientAuth); err != nil {
+		t.Fatal(err)
+	}
+	if retryRegisterResponse.StatusCode != http.StatusCreated ||
+		retriedClientAuth.User.Username != "cpl" ||
+		!strings.HasPrefix(retriedClientAuth.AccessToken, "ca_") ||
+		retriedClientAuth.AccessToken == clientAuth.AccessToken ||
+		retriedClientAuth.KeySalt != "test-salt" ||
+		retriedClientAuth.WrappedKey != "test-wrapped-key" {
+		t.Fatalf(
+			"partial registration retry did not resume safely: status=%d payload=%#v",
+			retryRegisterResponse.StatusCode,
+			retriedClientAuth,
+		)
+	}
+	clientAuth.AccessToken = retriedClientAuth.AccessToken
+	clientAuth.RefreshToken = retriedClientAuth.RefreshToken
+
 	diagnosticRequest, _ := http.NewRequest(
 		http.MethodPost,
 		server.URL+"/api/v1/client/diagnostics/upload-test",
@@ -305,6 +345,108 @@ func TestLoginAndClientHandoffFlow(t *testing.T) {
 	recoveredLoginResponse.Body.Close()
 	if recoveredLoginResponse.StatusCode != http.StatusOK {
 		t.Fatalf("login with recovered password status = %d", recoveredLoginResponse.StatusCode)
+	}
+}
+
+func TestMACDeviceIDMigratesLegacyDeviceAndHandoffReferences(t *testing.T) {
+	dataDir := t.TempDir()
+	cfg := Config{
+		Address:          ":0",
+		DataDir:          dataDir,
+		WebDir:           filepath.Join(dataDir, "missing-web"),
+		AdminEmail:       "admin@example.com",
+		AdminPassword:    "a-strong-test-password",
+		AdminName:        "测试管理员",
+		SessionTTL:       24 * 60 * 60 * 1e9,
+		ClientAccessTTL:  15 * 60 * 1e9,
+		ClientRefreshTTL: 30 * 24 * 60 * 60 * 1e9,
+		MaxUploadBytes:   20 << 20,
+		DownloadDir:      filepath.Join(dataDir, "downloads"),
+	}
+	store, err := OpenStore(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	user, err := store.Authenticate(cfg.AdminEmail, cfg.AdminPassword)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	legacyID := "legacy-device-id"
+	legacy, err := store.UpsertDevice(user.ID, model.Device{
+		ID:            legacyID,
+		Name:          "ThinkPad-CPL",
+		Hostname:      "ThinkPad-CPL",
+		OS:            "windows/amd64",
+		ClientVersion: "0.3.0",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	handoff, err := store.CreateHandoff(CreateHandoffParams{
+		UserID:         user.ID,
+		ProjectName:    "迁移测试",
+		WorkspaceKey:   "migration-test",
+		SourceDeviceID: legacy.ID,
+		Manifest:       json.RawMessage(`{"version":1}`),
+		BlobPath:       filepath.Join(dataDir, "legacy.ccx"),
+		BlobSize:       42,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	macID := "mac_" + strings.Repeat("c", 64)
+	migrated, err := store.UpsertDevice(user.ID, model.Device{
+		ID:            macID,
+		Name:          "ThinkPad-CPL",
+		Hostname:      "ThinkPad-CPL",
+		OS:            "windows/amd64",
+		ClientVersion: "0.4.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.ID != macID || !migrated.CreatedAt.Equal(legacy.CreatedAt) {
+		t.Fatalf("unexpected migrated device: %#v (legacy %#v)", migrated, legacy)
+	}
+
+	var deviceCount, legacyCount int
+	if err := store.db.QueryRow("SELECT COUNT(1) FROM devices WHERE user_id=?", user.ID).
+		Scan(&deviceCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow("SELECT COUNT(1) FROM devices WHERE id=?", legacyID).
+		Scan(&legacyCount); err != nil {
+		t.Fatal(err)
+	}
+	var handoffSource string
+	if err := store.db.QueryRow("SELECT source_device_id FROM handoffs WHERE id=?", handoff.ID).
+		Scan(&handoffSource); err != nil {
+		t.Fatal(err)
+	}
+	if deviceCount != 1 || legacyCount != 0 || handoffSource != macID {
+		t.Fatalf(
+			"migration counts device=%d legacy=%d handoffSource=%q",
+			deviceCount,
+			legacyCount,
+			handoffSource,
+		)
+	}
+
+	renamed, err := store.UpsertDevice(user.ID, model.Device{
+		ID:            macID,
+		Name:          "ThinkPad-CPL（已改名）",
+		Hostname:      "ThinkPad-CPL",
+		OS:            "windows/amd64",
+		ClientVersion: "0.4.1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamed.ID != macID || renamed.Name != "ThinkPad-CPL（已改名）" {
+		t.Fatalf("unexpected renamed device: %#v", renamed)
 	}
 }
 

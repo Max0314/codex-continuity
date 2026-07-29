@@ -16,7 +16,11 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound       = errors.New("not found")
+	ErrDeviceConflict = errors.New("device conflict")
+	ErrDeviceNotOwned = errors.New("device not owned")
+)
 
 type Store struct {
 	db      *sql.DB
@@ -319,6 +323,35 @@ WHERE t.token_hash=?`, tokenDigest(legacyToken)).
 			Scan(&user.ID, &existingUsername, &user.Email, &user.DisplayName, &user.Role, &created)
 		if err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
+				resumed, resumeErr := scanAuthenticatedUser(tx.QueryRow(`
+SELECT id,username,email,display_name,password_hash,key_salt,wrapped_key,role,created_at
+FROM users
+WHERE username=? COLLATE NOCASE AND recovery_key_hash=?`,
+					username,
+					recoveryKeyHash,
+				))
+				if resumeErr == nil && checkPassword(resumed.PasswordHash, params.Password) {
+					if err := tx.Commit(); err != nil {
+						return ClientAccount{}, err
+					}
+					session, err := s.CreateClientSession(
+						resumed.ID,
+						accessTTL,
+						refreshTTL,
+					)
+					if err != nil {
+						return ClientAccount{}, err
+					}
+					return ClientAccount{
+						User:       resumed.User,
+						KeySalt:    resumed.KeySalt,
+						WrappedKey: resumed.WrappedKey,
+						Session:    session,
+					}, nil
+				}
+				if resumeErr != nil && !errors.Is(resumeErr, sql.ErrNoRows) {
+					return ClientAccount{}, resumeErr
+				}
 				return ClientAccount{}, fmt.Errorf("现有客户端令牌无效，无法关联原账号")
 			}
 			return ClientAccount{}, err
@@ -725,7 +758,7 @@ func (s *Store) UpsertDevice(userID string, device model.Device) (model.Device, 
 		err = s.db.QueryRow("SELECT id,user_id,created_at FROM devices WHERE id=?", device.ID).
 			Scan(&existingID, &existingUserID, &created)
 		if err == nil && existingUserID != userID {
-			return model.Device{}, fmt.Errorf("设备身份已属于其他账号")
+			return model.Device{}, fmt.Errorf("%w：设备身份已属于其他账号", ErrDeviceNotOwned)
 		}
 	} else {
 		err = s.db.QueryRow("SELECT id,user_id,created_at FROM devices WHERE user_id=? AND name=?", userID, device.Name).
@@ -744,6 +777,42 @@ UPDATE devices SET name=?,hostname=?,os=?,client_version=?,last_seen_at=? WHERE 
 			now.Format(time.RFC3339Nano), device.ID, userID)
 		return device, err
 	}
+	if isMACDeviceID(device.ID) {
+		var legacyID, legacyCreated string
+		err = s.db.QueryRow(`
+SELECT id,created_at FROM devices
+WHERE user_id=? AND name=? AND id NOT LIKE 'mac_%'`,
+			userID, device.Name,
+		).Scan(&legacyID, &legacyCreated)
+		if err == nil {
+			return s.migrateLegacyDeviceID(
+				userID,
+				legacyID,
+				legacyCreated,
+				device,
+				now,
+			)
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return model.Device{}, err
+		}
+		var conflictingID string
+		err = s.db.QueryRow(
+			"SELECT id FROM devices WHERE user_id=? AND name=?",
+			userID,
+			device.Name,
+		).Scan(&conflictingID)
+		if err == nil {
+			return model.Device{}, fmt.Errorf(
+				"%w：设备名称 %q 已由另一台设备使用，请先为其中一台设备改名",
+				ErrDeviceConflict,
+				device.Name,
+			)
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return model.Device{}, err
+		}
+	}
 	if device.ID == "" {
 		device.ID = newID()
 	}
@@ -755,6 +824,72 @@ VALUES(?,?,?,?,?,?,?,?)`,
 		device.ID, userID, device.Name, device.Hostname, device.OS, device.ClientVersion,
 		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano))
 	return device, err
+}
+
+func isMACDeviceID(value string) bool {
+	if !strings.HasPrefix(value, "mac_") || len(value) != 68 {
+		return false
+	}
+	_, err := hex.DecodeString(strings.TrimPrefix(value, "mac_"))
+	return err == nil
+}
+
+func (s *Store) migrateLegacyDeviceID(
+	userID, legacyID, legacyCreated string,
+	device model.Device,
+	now time.Time,
+) (model.Device, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return model.Device{}, err
+	}
+	defer tx.Rollback()
+
+	migrationName := "__migrating__" + device.ID
+	result, err := tx.Exec(`
+UPDATE devices SET name=?
+WHERE id=? AND user_id=? AND id NOT LIKE 'mac_%'`,
+		migrationName, legacyID, userID,
+	)
+	if err != nil {
+		return model.Device{}, err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return model.Device{}, err
+	}
+	if affected != 1 {
+		return model.Device{}, fmt.Errorf("%w：旧设备记录已发生变化，请重试登录", ErrDeviceConflict)
+	}
+
+	device.CreatedAt = parseTime(legacyCreated)
+	device.LastSeenAt = now
+	if _, err := tx.Exec(`
+INSERT INTO devices(id,user_id,name,hostname,os,client_version,last_seen_at,created_at)
+VALUES(?,?,?,?,?,?,?,?)`,
+		device.ID, userID, device.Name, device.Hostname, device.OS, device.ClientVersion,
+		now.Format(time.RFC3339Nano), legacyCreated,
+	); err != nil {
+		return model.Device{}, err
+	}
+	if _, err := tx.Exec(`
+UPDATE handoffs SET source_device_id=?
+WHERE user_id=? AND source_device_id=?`,
+		device.ID, userID, legacyID,
+	); err != nil {
+		return model.Device{}, err
+	}
+	if _, err := tx.Exec(
+		"DELETE FROM devices WHERE id=? AND user_id=?",
+		legacyID,
+		userID,
+	); err != nil {
+		return model.Device{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Device{}, err
+	}
+	return device, nil
 }
 
 func (s *Store) ListDevices(userID string) ([]model.Device, error) {
