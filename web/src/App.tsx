@@ -251,6 +251,11 @@ function Login({
             桌面客户端可直接注册同步账号；管理员仍可使用部署邮箱登录。
           </div>
         </form>
+        <footer className="filing-footer">
+          <a href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">
+            渝ICP备2026016967号-1
+          </a>
+        </footer>
       </section>
     </div>
   )
