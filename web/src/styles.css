@@ -1033,7 +1033,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   line-height: 1.5;
   text-align: center;
 }
-.filing-footer a { color: inherit; text-decoration: none; }
+.filing-footer a { display: inline-flex; align-items: center; gap: 4px; margin: 0 7px; color: inherit; text-decoration: none; }
+.filing-footer img { width: 16px; height: 17px; object-fit: contain; }
 .filing-footer a:hover { color: var(--primary-600); text-decoration: underline; text-underline-offset: 3px; }
 
 .app-loading { min-height: 100vh; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 15px; background: var(--canvas); }

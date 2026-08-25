@@ -10,5 +10,7 @@ test('shows the ICP filing link on the public login screen', async () => {
 
   assert.match(app, /渝ICP备2026016967号-1/);
   assert.match(app, /https:\/\/beian\.miit\.gov\.cn\//);
+  assert.match(app, /渝公网安备 50010502504754号/);
+  assert.match(app, /https:\/\/beian\.mps\.gov\.cn\/#\/query\/webSearch\?code=50010502504754/);
   assert.match(styles, /\.filing-footer/);
 });
