@@ -13,7 +13,7 @@ services:
     ports:
       - "127.0.0.1:24001:8080"
     env_file:
-      - /srv/fribench/apps/internal/codex-continuity/shared/.env
+      - /srv/fribench/tools/codex-continuity/shared/.env
     environment:
       CONTINUITY_ADDR: ":8080"
       CONTINUITY_DATA_DIR: "/data"
@@ -21,8 +21,8 @@ services:
       CONTINUITY_DOWNLOAD_DIR: "/downloads"
       CONTINUITY_MAX_UPLOAD_MIB: "500"
     volumes:
-      - /srv/fribench/apps/internal/codex-continuity/shared/data:/data
-      - /srv/fribench/apps/internal/codex-continuity/shared/downloads:/downloads:ro
+      - /srv/fribench/tools/codex-continuity/shared/data:/data
+      - /srv/fribench/tools/codex-continuity/shared/downloads:/downloads:ro
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777

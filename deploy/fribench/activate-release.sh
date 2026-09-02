@@ -4,7 +4,7 @@ set -Eeuo pipefail
 PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
 
 readonly release_id="${1:-}"
-readonly app_root='/srv/fribench/apps/internal/codex-continuity'
+readonly app_root='/srv/fribench/tools/codex-continuity'
 readonly release_dir="${app_root}/releases/${release_id}"
 readonly shared_dir="${app_root}/shared"
 readonly web_archive="/tmp/codex-continuity-web-${release_id}.tar.gz"

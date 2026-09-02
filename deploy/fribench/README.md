@@ -11,9 +11,9 @@
 容器继续在回环地址运行，临时入口关闭后可通过再次执行 `open` 重新开放。
 
 发布目录使用
-`/srv/fribench/apps/internal/codex-continuity/releases/<YYYYMMDD-HHMMSS>`，
+`/srv/fribench/tools/codex-continuity/releases/<YYYYMMDD-HHMMSS>`，
 共享数据、下载包和 `.env` 保存在
-`/srv/fribench/apps/internal/codex-continuity/shared`。`activate-release.sh`
+`/srv/fribench/tools/codex-continuity/shared`。`activate-release.sh`
 负责校验发布编号、解压前端、首次生成随机管理员密码并原子切换 `current` 链接。
 
 首次安装需要管理员执行一次：
@@ -26,7 +26,7 @@ sudo bash /tmp/codex-continuity-root/install-root.sh
 
 ```bash
 sudo docker compose \
-  -f /srv/fribench/apps/internal/codex-continuity/current/compose.yaml \
+  -f /srv/fribench/tools/codex-continuity/current/compose.yaml \
   up -d --build
 sudo /usr/local/sbin/fribench-codex-continuity open
 sudo /usr/local/sbin/fribench-codex-continuity status

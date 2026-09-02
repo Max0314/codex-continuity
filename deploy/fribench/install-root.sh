@@ -9,7 +9,7 @@ readonly nginx_source="${source_dir}/codex-continuity.nginx.conf"
 readonly control_target='/usr/local/sbin/fribench-codex-continuity'
 readonly nginx_target='/usr/local/share/fribench/codex-continuity.nginx.conf'
 readonly sudoers_target='/etc/sudoers.d/codex-continuity-deploy'
-readonly compose_file='/srv/fribench/apps/internal/codex-continuity/current/compose.yaml'
+readonly compose_file='/srv/fribench/tools/codex-continuity/current/compose.yaml'
 
 [ "$(id -u)" -eq 0 ] || {
   echo 'ERROR: run this installer through sudo.' >&2

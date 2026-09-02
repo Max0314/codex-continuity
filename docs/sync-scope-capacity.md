@@ -21,7 +21,7 @@ v0.3.1 改成逐 part 解析：
 生产环境数据目录：
 
 ```text
-/srv/fribench/apps/internal/codex-continuity/shared/data/
+/srv/fribench/tools/codex-continuity/shared/data/
   continuity.db
   continuity.db-wal
   continuity.db-shm

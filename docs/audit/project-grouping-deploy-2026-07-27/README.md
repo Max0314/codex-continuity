@@ -82,7 +82,7 @@ Codex Continuity 分配 `24001`：
 1. 为 Codex Continuity 增加窄范围 sudo 授权，只允许操作固定
    Compose 文件、Nginx 配置和对应 UFW 规则；
 2. 部署目录使用
-   `/srv/fribench/apps/internal/codex-continuity/releases/<version>`，
+   `/srv/fribench/tools/codex-continuity/releases/<version>`，
    并通过 `current` 软链接切换版本；
 3. 服务端只绑定回环地址，不直接把 Docker 端口暴露到 `0.0.0.0`；
 4. Nginx 和 UFW 临时开放 `24001`，48 小时后自动关闭公网入口；
