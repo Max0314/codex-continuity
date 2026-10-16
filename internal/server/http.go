@@ -75,6 +75,12 @@ func NewHTTPServer(cfg Config, store *Store, logger *slog.Logger) http.Handler {
 }
 
 func (s *HTTPServer) health(w http.ResponseWriter, _ *http.Request) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if s.store.db.PingContext(ctx) != nil {
+		writeError(w, 503, "存储暂时不可用")
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"status":  "ok",
 		"service": "codex-continuity",

@@ -57,6 +57,9 @@ func (s *HTTPServer) platformIdentity(r *http.Request, grant any) (string, strin
 	if json.NewDecoder(io.LimitReader(resp.Body, 8192)).Decode(&identity) != nil || identity.Sub == "" || len(identity.Sub) > 200 {
 		return "", "", ErrNotFound
 	}
+	if grant == nil && !identity.Authenticated {
+		return "", "", ErrNotFound
+	}
 	return identity.Sub, identity.Name, nil
 }
 

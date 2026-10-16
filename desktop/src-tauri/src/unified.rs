@@ -105,20 +105,39 @@ pub(super) fn unlock_account(
     let _session = load_auth_session()
         .filter(|s| s.unified)
         .ok_or("请先连接统一账号")?;
-    let key = STANDARD_NO_PAD
-        .decode(recovery_key.trim())
-        .map_err(|_| "恢复密钥格式无效")?;
-    if key.len() != 32
-        || Some(format!("{:x}", Sha256::digest(&key))) != read_secret("key-fingerprint")
-    {
-        return Err("恢复密钥不匹配；本地和云端数据未被修改".into());
-    }
+    let key = decode_recovery_key(
+        &recovery_key,
+        &read_secret("key-fingerprint").ok_or("密钥指纹未就绪，请重新连接账号")?,
+    )?;
     write_secret("encryption-key", &STANDARD_NO_PAD.encode(key))?;
     Ok(AuthActionResult {
         status: auth_status_for(&load_settings_file(&app)?),
         message: "本机加密密钥已解锁".into(),
         recovery_key: None,
     })
+}
+fn decode_recovery_key(value: &str, fingerprint: &str) -> Result<Vec<u8>, String> {
+    let key = STANDARD_NO_PAD
+        .decode(value.trim())
+        .map_err(|_| "恢复密钥格式无效")?;
+    if key.len() != 32 || format!("{:x}", Sha256::digest(&key)) != fingerprint {
+        return Err("恢复密钥不匹配；本地和云端数据未被修改".into());
+    }
+    Ok(key)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn recovery_key_is_verified_locally_and_rejects_wrong_account() {
+        let key = [4u8; 32];
+        let value = STANDARD_NO_PAD.encode(key);
+        let hash = format!("{:x}", Sha256::digest(key));
+        assert_eq!(decode_recovery_key(&value, &hash).unwrap(), key);
+        assert!(decode_recovery_key(&value, &"a".repeat(64)).is_err());
+        assert!(decode_recovery_key("invalid", &hash).is_err());
+    }
 }
 #[tauri::command]
 pub(super) async fn guest_archive(

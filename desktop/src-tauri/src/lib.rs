@@ -537,9 +537,10 @@ fn stored_session_from_envelope(envelope: &ClientAuthEnvelope) -> StoredAuthSess
 
 fn auth_status_for(settings: &SettingsFile) -> AuthStatus {
     let session = load_auth_session();
+    let retired = retired_public_session(settings, session.as_ref());
     AuthStatus {
-        encryption_unlocked: read_secret("encryption-key").is_some(),
-        authenticated: session.is_some(),
+        encryption_unlocked: !retired && read_secret("encryption-key").is_some(),
+        authenticated: session.is_some() && !retired,
         username: session
             .as_ref()
             .map(|value| value.user.username.clone())
@@ -548,12 +549,13 @@ fn auth_status_for(settings: &SettingsFile) -> AuthStatus {
             .as_ref()
             .map(|value| value.user.display_name.clone())
             .unwrap_or_default(),
-        server_url: if settings.server_url.trim().is_empty() {
+        server_url: if retired || settings.server_url.trim().is_empty() {
             DEFAULT_SERVER_URL.to_string()
         } else {
             settings.server_url.clone()
         },
-        legacy_account_available: read_secret("api-token").is_some() && session.is_none(),
+        legacy_account_available: retired
+            || (read_secret("api-token").is_some() && session.is_none()),
         transport_secure: session.as_ref().is_some_and(|value| value.transport_secure),
     }
 }
@@ -812,11 +814,20 @@ fn response_error(status: StatusCode, body: &str) -> String {
 }
 
 fn configured(settings: &SettingsFile) -> bool {
+    if retired_public_session(settings, load_auth_session().as_ref()) {
+        return false;
+    }
     !settings.server_url.is_empty()
         && !settings.device_id.is_empty()
         && Path::new(&settings.root).is_dir()
         && load_auth_session().is_some()
         && read_secret("encryption-key").is_some()
+}
+
+fn retired_public_session(settings: &SettingsFile, session: Option<&StoredAuthSession>) -> bool {
+    session.is_some_and(|s| !s.unified)
+        && (settings.server_url.trim_end_matches('/') == "http://1.14.72.50:24001"
+            || settings.server_url.trim_end_matches('/') == DEFAULT_SERVER_URL)
 }
 
 async fn check_connection(server_url: &str) -> Result<ConnectionResult, String> {
@@ -2587,6 +2598,23 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn old_public_sessions_do_not_auto_upload_or_rebind() {
+        let mut settings = SettingsFile {
+            server_url: "http://1.14.72.50:24001".into(),
+            ..Default::default()
+        };
+        let legacy = StoredAuthSession::default();
+        assert!(retired_public_session(&settings, Some(&legacy)));
+        settings.server_url = "https://self-hosted.example".into();
+        assert!(!retired_public_session(&settings, Some(&legacy)));
+        settings.server_url = DEFAULT_SERVER_URL.into();
+        let unified = StoredAuthSession {
+            unified: true,
+            ..Default::default()
+        };
+        assert!(!retired_public_session(&settings, Some(&unified)));
+    }
 
     #[test]
     fn normalizes_server_urls() {
