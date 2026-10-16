@@ -14,5 +14,6 @@ release/*
 tools/
 *.log
 coverage/
+/test-results/
 *.exe
 *.zip
