@@ -4,6 +4,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react'
 import {
@@ -103,6 +104,7 @@ function pageFromHash(): PageName {
 function DesktopApp() {
   const [auth, setAuth] = useState<AuthStatus | null>(null)
   const [guestMode, setGuestMode] = useState(false)
+  const contextGeneration=useRef(0)
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null)
   const [page, setPage] = useState<PageName>(pageFromHash)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -114,8 +116,10 @@ function DesktopApp() {
   )
 
   const reload = useCallback(async (quiet = false) => {
+    const generation=contextGeneration.current
     try {
       const next = await desktopApi.dashboard()
+      if(generation!==contextGeneration.current)return
       setSnapshot(next)
       document.documentElement.dataset.theme = next.settings.theme
     } catch (error) {
@@ -202,8 +206,9 @@ function DesktopApp() {
     return (
       <UnifiedGate
         initial={auth}
-        onGuest={async()=>{setGuestMode(true);await reload()}}
+        onGuest={async()=>{contextGeneration.current++;setSnapshot(null);setGuestMode(true);await reload()}}
         onAuthenticated={async (result) => {
+          contextGeneration.current++;setSnapshot(null);setContinuation(null)
           setGuestMode(false)
           setAuth(result.status)
           setToast({ tone: 'success', text: result.message })
@@ -313,6 +318,7 @@ function DesktopApp() {
               'logout',
               desktopApi.logoutAccount,
               (result) => {
+                contextGeneration.current++
                 setAuth({ ...auth, authenticated: false, username: '', displayName: '' })
                 setGuestMode(false)
                 setSnapshot(null)

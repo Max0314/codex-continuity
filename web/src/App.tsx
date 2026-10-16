@@ -111,7 +111,7 @@ export default function App() {
   if (!user) return <Login theme={theme} setTheme={setTheme} onLogin={setUser} />
 
   return (
-    <div className="app-shell">
+    <div className="app-shell" key={user.id}>
       <Header
         user={user}
         theme={theme}
