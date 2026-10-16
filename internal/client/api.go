@@ -17,9 +17,10 @@ import (
 )
 
 type API struct {
-	baseURL string
-	token   string
-	client  *http.Client
+	guestStage string
+	baseURL    string
+	token      string
+	client     *http.Client
 }
 
 func NewAPI(cfg Config) *API {
@@ -98,6 +99,10 @@ func (a *API) UploadHandoff(metadata UploadMetadata, encryptedPath string) (mode
 	}
 	req.Header.Set("Authorization", "Bearer "+a.token)
 	req.Header.Set("Content-Type", contentType)
+	if a.guestStage != "" {
+		req.Header.Set("X-Fribench-Guest-Stage", a.guestStage)
+		req.Header.Set("X-Fribench-Confirm", "true")
+	}
 	resp, err := a.client.Do(req)
 	if err != nil {
 		return model.Handoff{}, err

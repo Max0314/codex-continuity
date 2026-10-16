@@ -4,4 +4,11 @@
 data
 release
 tools
+**/target
+**/binaries
+.env
+**/.env
+**/.env.*
+*.key
+*.pem
 *.log

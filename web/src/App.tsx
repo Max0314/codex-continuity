@@ -101,6 +101,10 @@ export default function App() {
       .then(({ user: current }) => setUser(current))
       .catch(() => setUser(null))
       .finally(() => setChecking(false))
+    const changed=()=>{setUser(null);setPage('overview');api.me().then(({user:current})=>setUser(current)).catch(()=>setUser(null))}
+    window.addEventListener('fribench:account-change',changed)
+    const script=document.createElement('script');script.src='/_fribench/client.js';script.defer=true;document.body.append(script)
+    return ()=>window.removeEventListener('fribench:account-change',changed)
   }, [])
 
   if (checking) return <AppLoading />
@@ -129,7 +133,7 @@ export default function App() {
       />
       {sidebarOpen && <button className="sidebar-scrim" aria-label="关闭菜单" onClick={() => setSidebarOpen(false)} />}
       <main className="main-content">
-        {page === 'overview' && <OverviewPage onNavigate={setPage} />}
+        {page === 'overview' && <OverviewPage key={user.id} onNavigate={setPage} />}
         {page === 'devices' && <DevicesPage />}
         {page === 'handoffs' && <HandoffsPage />}
         {page === 'users' && <UsersPage currentUser={user} />}
@@ -219,8 +223,11 @@ function Login({
             <span>Codex Continuity</span>
           </div>
           <span className="form-kicker">欢迎回来</span>
-          <h2>登录管理空间</h2>
-          <p className="form-intro">查看设备状态、会话快照与团队成员。</p>
+          <h2>继续你的工作</h2>
+          <p className="form-intro">客户端下载、功能介绍无需登录。连接 Fribench 后自动识别同一浏览器账号，快照与设备仅自己可见。</p>
+          <a className="primary-button login-submit" href="/_fribench/auth/login?return_to=/">连接 Fribench 账号</a>
+          <PublicDownload/>
+          <details><summary>服务运维人员入口</summary>
           <label>
             <span>用户名或邮箱</span>
             <input
@@ -248,8 +255,9 @@ function Login({
             {!busy && <ChevronRight size={18} />}
           </button>
           <div className="login-help">
-            桌面客户端可直接注册同步账号；管理员仍可使用部署邮箱登录。
+            仅供服务部署管理员使用；普通用户通过 Fribench 统一登录。
           </div>
+          </details>
         </form>
         <footer className="filing-footer">
           <a href="https://beian.miit.gov.cn/" target="_blank" rel="noreferrer">
@@ -272,6 +280,13 @@ function Login({
       </section>
     </div>
   )
+}
+
+function PublicDownload(){
+ const [release,setRelease]=useState<DesktopReleaseManifest|null>(null)
+ useEffect(()=>{api.desktopRelease().then(setRelease).catch(()=>undefined)},[])
+ const artifact=release?.artifacts.find(item=>item.id==='standard')
+ return <section className="public-download"><Download/><div><strong>Windows 桌面版 {release?'v'+release.version:''}</strong><p>本机查看会话无需账号。云端同步按需连接，密文保留在你的空间。</p>{artifact?<a href={'/downloads/'+encodeURIComponent(artifact.fileName)}>下载标准安装包 · {(artifact.sizeBytes/1024/1024).toFixed(1)} MB</a>:<span>正在加载安装包…</span>}</div></section>
 }
 
 function Feature({ icon, title, text }: { icon: ReactNode; title: string; text: string }) {
@@ -818,8 +833,8 @@ function DownloadsPage() {
         <Panel title="安装与激活" className="desktop-onboarding">
           <ol className="step-list">
             <li><span>1</span><div><strong>选择合适的安装版</strong><p>普通电脑使用标准版；断网或 Microsoft 下载受限时使用完整离线版。</p></div></li>
-            <li><span>2</span><div><strong>创建客户端令牌</strong><p>在“API 令牌”页面创建凭据，复制到桌面客户端的基础配置。</p></div></li>
-            <li><span>3</span><div><strong>完成两项测试</strong><p>依次执行“连接测试”和“加密上传测试”，通过后客户端会自动同步。</p></div></li>
+            <li><span>2</span><div><strong>连接 Fribench 账号</strong><p>在客户端打开系统浏览器，已有登录态自动识别；无需复制 API Token。</p></div></li>
+            <li><span>3</span><div><strong>保存恢复密钥与选择同步范围</strong><p>新设备首次解密需要恢复密钥。旧会话不会自动绑定，需先预览确认。</p></div></li>
           </ol>
         </Panel>
         <Panel title="兼容与团队部署" className="deployment-options">

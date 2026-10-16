@@ -16,7 +16,7 @@ import (
 	"github.com/neonet/codex-continuity/internal/model"
 )
 
-const version = "0.4.2"
+const version = "0.5.0"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -33,6 +33,10 @@ func main() {
 		err = scanCommand(os.Args[2:])
 	case "publish":
 		err = publishCommand(os.Args[2:])
+	case "guest-prepare":
+		err = guestPrepareCommand(os.Args[2:])
+	case "guest-confirm":
+		err = guestConfirmCommand(os.Args[2:])
 	case "flush":
 		err = flushCommand(os.Args[2:])
 	case "export":

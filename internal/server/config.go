@@ -10,6 +10,9 @@ import (
 )
 
 type Config struct {
+	DatabaseURL      string
+	IdentityEndpoint string
+	IdentitySecret   string
 	Address          string
 	DataDir          string
 	WebDir           string
@@ -37,6 +40,9 @@ func LoadConfig() (Config, error) {
 		return Config{}, fmt.Errorf("CONTINUITY_MAX_UPLOAD_MIB must be a positive integer")
 	}
 	cfg := Config{
+		DatabaseURL:      os.Getenv("DATABASE_URL"),
+		IdentityEndpoint: env("FRIBENCH_IDENTITY_ENDPOINT", "http://fribench-services-api-1:8080/internal/identity"),
+		IdentitySecret:   os.Getenv("FRIBENCH_CLIENT_SECRET"),
 		Address:          env("CONTINUITY_ADDR", ":8080"),
 		DataDir:          absDataDir,
 		WebDir:           env("CONTINUITY_WEB_DIR", "./web/dist"),
@@ -46,7 +52,7 @@ func LoadConfig() (Config, error) {
 		AdminName:        env("CONTINUITY_ADMIN_NAME", "系统管理员"),
 		SessionTTL:       7 * 24 * time.Hour,
 		ClientAccessTTL:  15 * time.Minute,
-		ClientRefreshTTL: 30 * 24 * time.Hour,
+		ClientRefreshTTL: 3650 * 24 * time.Hour,
 		MaxUploadBytes:   maxMiB * 1024 * 1024,
 		CookieSecure:     envBool("CONTINUITY_COOKIE_SECURE", false),
 		TrustProxy:       envBool("CONTINUITY_TRUST_PROXY", false),

@@ -11,7 +11,8 @@ $desktopDir = Join-Path $projectRoot 'desktop'
 $sidecarDir = Join-Path $desktopDir 'src-tauri\binaries'
 $releaseDir = Join-Path $projectRoot 'release'
 $goBin = Join-Path $projectRoot 'tools\go\bin'
-$bundleRoot = Join-Path $desktopDir 'src-tauri\target\release\bundle'
+$cargoTarget = if ($env:CARGO_TARGET_DIR) { [IO.Path]::GetFullPath($env:CARGO_TARGET_DIR) } else { Join-Path $desktopDir 'src-tauri\target' }
+$bundleRoot = Join-Path $cargoTarget 'release\bundle'
 $tauriConfigPath = Join-Path $desktopDir 'src-tauri\tauri.conf.json'
 $offlineConfigPath = 'src-tauri\tauri.offline.conf.json'
 $desktopVersion = (Get-Content -LiteralPath $tauriConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json).version
@@ -88,6 +89,7 @@ $env:CGO_ENABLED = '0'
 $env:GOOS = 'windows'
 $env:GOARCH = 'amd64'
 go build -trimpath -ldflags '-s -w' -o (Join-Path $sidecarDir 'continuity-core-x86_64-pc-windows-msvc.exe') ./cmd/continuity-client
+if ($LASTEXITCODE -ne 0) { throw 'Go sidecar build failed.' }
 Remove-Item Env:\GOOS, Env:\GOARCH, Env:\CGO_ENABLED -ErrorAction SilentlyContinue
 
 $env:Path = "$(Split-Path -Parent $cargoExe);$env:Path"
@@ -136,8 +138,8 @@ if ($staleBundle -and (Test-Path -LiteralPath $bundleRoot) -and (Test-Path -Lite
     Remove-Item -LiteralPath $staleBundle -Recurse -Force
 }
 
-$desktopExe = Join-Path $desktopDir 'src-tauri\target\release\codex-continuity-desktop.exe'
-$sidecarExe = Join-Path $desktopDir 'src-tauri\target\release\continuity-core.exe'
+$desktopExe = Join-Path $cargoTarget 'release\codex-continuity-desktop.exe'
+$sidecarExe = Join-Path $cargoTarget 'release\continuity-core.exe'
 if ((Test-Path -LiteralPath $desktopExe) -and (Test-Path -LiteralPath $sidecarExe)) {
     Compress-Archive -LiteralPath $desktopExe, $sidecarExe -DestinationPath (Join-Path $releaseDir $portableName) -CompressionLevel Optimal -Force
 }

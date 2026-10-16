@@ -307,6 +307,9 @@ func scanSessions(root string, scope SyncScope) ([]SessionState, []string) {
 	if scope.Days > 0 {
 		cutoff = time.Now().Add(-time.Duration(scope.Days) * 24 * time.Hour)
 	}
+	if after, err := time.Parse(time.RFC3339Nano, scope.After); err == nil && after.After(cutoff) {
+		cutoff = after
+	}
 	byID := map[string]SessionState{}
 	scanRoot := func(sessionRoot string, archived bool) {
 		_ = filepath.WalkDir(sessionRoot, func(path string, entry fs.DirEntry, walkErr error) error {

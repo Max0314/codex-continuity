@@ -37,6 +37,7 @@ export interface SaveSettingsRequest {
 }
 
 export interface AuthStatus {
+  encryptionUnlocked?: boolean
   authenticated: boolean
   username: string
   displayName: string

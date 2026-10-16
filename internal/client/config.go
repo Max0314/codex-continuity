@@ -27,6 +27,7 @@ const (
 )
 
 type SyncScope struct {
+	After             string   `json:"after,omitempty"`
 	Days              int      `json:"days"`
 	ProjectPaths      []string `json:"projectPaths,omitempty"`
 	IncludeArchived   bool     `json:"includeArchived"`

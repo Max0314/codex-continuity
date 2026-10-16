@@ -2,6 +2,8 @@ use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
 };
+mod native_login;
+mod unified;
 use argon2::{Algorithm, Argon2, Params, Version};
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine as _};
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
@@ -32,7 +34,7 @@ const KEYRING_SERVICE: &str = "com.neonet.codexcontinuity";
 const AUTO_SYNC_INTERVAL_SECONDS: i64 = 300;
 const MAX_LOCAL_CONVERSATIONS: usize = 1000;
 const MAX_BUNDLE_MIB: u16 = 500;
-const DEFAULT_SERVER_URL: &str = "http://1.14.72.50:24001";
+const DEFAULT_SERVER_URL: &str = "https://continuity.fribench.cn";
 const AUTH_SESSION_SECRET: &str = "auth-session";
 
 #[derive(Clone, Default)]
@@ -138,6 +140,8 @@ struct AuthUser {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct StoredAuthSession {
+    unified: bool,
+    connected_at: String,
     user: AuthUser,
     access_token: String,
     refresh_token: String,
@@ -188,6 +192,7 @@ struct RecoverAccountRequest {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AuthStatus {
+    encryption_unlocked: bool,
     authenticated: bool,
     username: String,
     display_name: String,
@@ -426,17 +431,11 @@ fn settings_path(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 fn sync_state_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|path| path.join("sync-state.json"))
-        .map_err(|error| format!("无法确定同步状态目录：{error}"))
+    Ok(unified::account_dir(app)?.join("sync-state.json"))
 }
 
 fn outbox_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_config_dir()
-        .map(|path| path.join("outbox"))
-        .map_err(|error| format!("无法确定离线队列目录：{error}"))
+    Ok(unified::account_dir(app)?.join("outbox"))
 }
 
 fn load_settings_file(app: &AppHandle) -> Result<SettingsFile, String> {
@@ -490,17 +489,20 @@ fn secret_entry(name: &str) -> Result<keyring::Entry, String> {
 }
 
 fn read_secret(name: &str) -> Option<String> {
-    secret_entry(name).ok()?.get_password().ok()
+    secret_entry(&unified::secret_name(name))
+        .ok()?
+        .get_password()
+        .ok()
 }
 
 fn write_secret(name: &str, value: &str) -> Result<(), String> {
-    secret_entry(name)?
+    secret_entry(&unified::secret_name(name))?
         .set_password(value)
         .map_err(|error| format!("保存 Windows 凭据失败：{error}"))
 }
 
 fn delete_secret(name: &str) {
-    if let Ok(entry) = secret_entry(name) {
+    if let Ok(entry) = secret_entry(&unified::secret_name(name)) {
         let _ = entry.delete_credential();
     }
 }
@@ -518,6 +520,12 @@ fn write_auth_session(session: &StoredAuthSession) -> Result<(), String> {
 
 fn stored_session_from_envelope(envelope: &ClientAuthEnvelope) -> StoredAuthSession {
     StoredAuthSession {
+        unified: envelope.key_salt == "recovery-v1",
+        connected_at: load_auth_session()
+            .filter(|v| v.user.id == envelope.user.id)
+            .map(|v| v.connected_at)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(now_iso),
         user: envelope.user.clone(),
         access_token: envelope.access_token.clone(),
         refresh_token: envelope.refresh_token.clone(),
@@ -530,6 +538,7 @@ fn stored_session_from_envelope(envelope: &ClientAuthEnvelope) -> StoredAuthSess
 fn auth_status_for(settings: &SettingsFile) -> AuthStatus {
     let session = load_auth_session();
     AuthStatus {
+        encryption_unlocked: read_secret("encryption-key").is_some(),
         authenticated: session.is_some(),
         username: session
             .as_ref()
@@ -691,8 +700,10 @@ fn native_primary_mac_address() -> Result<String, String> {
         let mut current = first_adapter;
         while !current.is_null() {
             let adapter = unsafe { &*current };
-            let mut row = MIB_IF_ROW2::default();
-            row.InterfaceLuid = adapter.Luid;
+            let mut row = MIB_IF_ROW2 {
+                InterfaceLuid: adapter.Luid,
+                ..Default::default()
+            };
             let row_status = unsafe { GetIfEntry2(&mut row) };
             if row_status == ERROR_SUCCESS {
                 let length =
@@ -736,7 +747,7 @@ fn native_primary_mac_address() -> Result<String, String> {
 fn primary_mac_address() -> Result<String, String> {
     #[cfg(target_os = "windows")]
     {
-        return native_primary_mac_address();
+        native_primary_mac_address()
     }
     #[cfg(not(target_os = "windows"))]
     {
@@ -866,6 +877,8 @@ async fn request_account_login(
 }
 
 async fn ensure_access_token(settings: &SettingsFile) -> Result<String, String> {
+    static REFRESH_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _refresh_guard = REFRESH_LOCK.lock().await;
     let mut session = load_auth_session().ok_or_else(|| "请先登录账号".to_string())?;
     let still_valid = DateTime::parse_from_rfc3339(&session.access_expires_at)
         .map(|expires| expires.with_timezone(&Utc) > Utc::now() + ChronoDuration::minutes(1))
@@ -887,6 +900,11 @@ async fn ensure_access_token(settings: &SettingsFile) -> Result<String, String> 
         .await
         .map_err(|error| format!("刷新登录状态失败：{error}"))?;
     let envelope = parse_auth_response(response).await?;
+    if !load_auth_session()
+        .is_some_and(|s| s.user.id == session.user.id && s.refresh_token == session.refresh_token)
+    {
+        return Err("账号已切换，请重新操作".into());
+    }
     session = stored_session_from_envelope(&envelope);
     write_auth_session(&session)?;
     Ok(session.access_token)
@@ -963,12 +981,13 @@ async fn finish_account_login(
     )
     .await?;
     let session = stored_session_from_envelope(&envelope);
-    write_secret("encryption-key", &STANDARD_NO_PAD.encode(&key))?;
     write_auth_session(&session)?;
+    write_secret("encryption-key", &STANDARD_NO_PAD.encode(&key))?;
     settings.server_url = server_url;
     settings.device_id = device_id;
     write_settings_file(app, &settings)?;
     let status = AuthStatus {
+        encryption_unlocked: true,
         authenticated: true,
         username: session.user.username.clone(),
         display_name: session.user.display_name.clone(),
@@ -1184,7 +1203,7 @@ fn scan_local_conversations(settings: &SettingsFile) -> Vec<LocalConversation> {
         }
     }
     let mut conversations = by_id.into_values().collect::<Vec<_>>();
-    conversations.sort_by(|left, right| right.modified_millis.cmp(&left.modified_millis));
+    conversations.sort_by_key(|item| std::cmp::Reverse(item.modified_millis));
     conversations.truncate(MAX_LOCAL_CONVERSATIONS);
     conversations
 }
@@ -1590,9 +1609,20 @@ fn encrypted_test_payload(key: &[u8]) -> Result<(usize, Vec<u8>, String), String
 }
 
 fn temp_core_config(settings: &SettingsFile) -> Result<tempfile::NamedTempFile, String> {
-    let token = read_secret("api-token").ok_or_else(|| "请先登录账号".to_string())?;
-    let encryption_key =
-        read_secret("encryption-key").ok_or_else(|| "请先配置加密密钥".to_string())?;
+    let token = read_secret("api-token").unwrap_or_else(|| "offline-only".into());
+    let encryption_key = match read_secret("encryption-key") {
+        Some(key) => key,
+        None => {
+            if load_auth_session().is_some() {
+                return Err("请先解锁账号恢复密钥".into());
+            }
+            let mut key = [0u8; 32];
+            rand::rng().fill_bytes(&mut key);
+            let value = STANDARD_NO_PAD.encode(key);
+            write_secret("encryption-key", &value)?;
+            value
+        }
+    };
     let mut file = tempfile::Builder::new()
         .prefix("codex-continuity-")
         .suffix(".json")
@@ -1608,6 +1638,7 @@ fn temp_core_config(settings: &SettingsFile) -> Result<tempfile::NamedTempFile, 
             "deviceId": settings.device_id,
             "encryptionKey": encryption_key,
             "syncScope": {
+                "after": load_auth_session().filter(|s|s.unified).map(|s|s.connected_at).unwrap_or_default(),
                 "days": settings.sync_days,
                 "projectPaths": settings.selected_projects,
                 "includeArchived": settings.include_archived,
@@ -1911,9 +1942,11 @@ async fn logout_account(app: AppHandle) -> Result<ActionResult, String> {
             .send()
             .await;
     }
+    if !load_auth_session().is_some_and(|s| s.unified) {
+        delete_secret("encryption-key");
+    }
     delete_secret(AUTH_SESSION_SECRET);
     delete_secret("api-token");
-    delete_secret("encryption-key");
     settings.device_id.clear();
     write_settings_file(&app, &settings)?;
     Ok(ActionResult {
@@ -1924,10 +1957,8 @@ async fn logout_account(app: AppHandle) -> Result<ActionResult, String> {
 
 #[tauri::command]
 fn get_recovery_key() -> Result<String, String> {
-    if load_auth_session().is_none() {
-        return Err("请先登录账号".to_string());
-    }
-    read_secret("encryption-key").ok_or_else(|| "本机恢复密钥不可用，请重新登录".to_string())
+    read_secret("encryption-key")
+        .ok_or_else(|| "本机恢复密钥不可用，请先创建本机归档或连接账号".to_string())
 }
 
 #[tauri::command]
@@ -1968,23 +1999,34 @@ async fn save_settings(
     if !current.server_url.eq_ignore_ascii_case(&server_url) {
         return Err("切换服务端前请先退出当前账号，再在登录页选择新的服务端".to_string());
     }
-    let session = load_auth_session().ok_or_else(|| "请先登录账号".to_string())?;
-    let token = ensure_access_token(&current).await?;
-    let encryption_key = read_secret("encryption-key")
-        .ok_or_else(|| "账号同步密钥不可用，请重新登录".to_string())?;
-    let decoded = STANDARD_NO_PAD
-        .decode(encryption_key.as_bytes())
-        .map_err(|_| "Windows 凭据中的账号同步密钥无效".to_string())?;
-    if decoded.len() != 32 {
-        return Err("Windows 凭据中的账号同步密钥长度无效".to_string());
-    }
-    let connection = check_connection(&server_url).await?;
+    let session = load_auth_session();
+    let token = if session.is_some() {
+        Some(ensure_access_token(&current).await?)
+    } else {
+        None
+    };
+    let connection = ConnectionResult {
+        ok: true,
+        latency_ms: 0,
+        service: if session.is_some() {
+            "Codex Continuity"
+        } else {
+            "本机离线模式"
+        }
+        .into(),
+        checked_at: now_iso(),
+    };
     current.server_url = server_url;
     current.root = root.to_string_lossy().to_string();
     current.device_name = request.device_name.trim().to_string();
-    current.device_id =
-        register_current_device(&current, &current.server_url, &token, &session.user.id).await?;
-    current.auto_sync = request.auto_sync;
+    if let (Some(session), Some(token)) = (session, token) {
+        current.device_id =
+            register_current_device(&current, &current.server_url, &token, &session.user.id)
+                .await?;
+        current.auto_sync = request.auto_sync
+    } else {
+        current.auto_sync = false
+    }
     current.launch_at_startup = request.launch_at_startup;
     current.theme = request.theme;
     current.sync_days = request.sync_days;
@@ -2345,7 +2387,7 @@ fn show_main_window(app: AppHandle, page: Option<String>) -> Result<(), String> 
     if let Some(page) =
         page.filter(|value| ["conversations", "sync", "settings"].contains(&value.as_str()))
     {
-        let _ = window.eval(&format!(
+        let _ = window.eval(format!(
             "window.location.hash = {};",
             serde_json::to_string(&page).unwrap_or_else(|_| "\"conversations\"".to_string())
         ));
@@ -2437,7 +2479,7 @@ pub fn run() {
         .setup(|app| {
             let sync_shortcut =
                 Shortcut::new(Some(Modifiers::CONTROL | Modifiers::ALT), Code::KeyP);
-            let handler_shortcut = sync_shortcut.clone();
+            let handler_shortcut = sync_shortcut;
             app.handle().plugin(
                 tauri_plugin_global_shortcut::Builder::new()
                     .with_handler(move |app, shortcut, event| {
@@ -2512,6 +2554,10 @@ pub fn run() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            unified::connect_account,
+            unified::unlock_account,
+            unified::guest_archive,
+            unified::cancel_guest_preview,
             get_auth_status,
             register_account,
             login_account,

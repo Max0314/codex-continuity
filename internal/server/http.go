@@ -30,18 +30,21 @@ const (
 var errUploadTooLarge = errors.New("upload exceeds configured blob limit")
 
 type HTTPServer struct {
-	cfg   Config
-	store *Store
-	log   *slog.Logger
+	cfg     Config
+	store   *Store
+	log     *slog.Logger
+	uploads chan struct{}
 }
 
 func NewHTTPServer(cfg Config, store *Store, logger *slog.Logger) http.Handler {
-	s := &HTTPServer{cfg: cfg, store: store, log: logger}
+	s := &HTTPServer{cfg: cfg, store: store, log: logger, uploads: make(chan struct{}, 2)}
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/v1/health", s.health)
 	mux.HandleFunc("POST /api/v1/auth/login", s.login)
 	mux.HandleFunc("POST /api/v1/client/auth/register", s.clientRegister)
+	mux.HandleFunc("POST /api/v1/client/auth/fribench", s.unifiedLogin)
+	mux.Handle("POST /api/v1/client/guest-preview", s.withClientAuth(http.HandlerFunc(s.guestPreview)))
 	mux.HandleFunc("POST /api/v1/client/auth/login", s.clientLogin)
 	mux.HandleFunc("POST /api/v1/client/auth/recover", s.clientRecover)
 	mux.HandleFunc("POST /api/v1/client/auth/refresh", s.clientRefresh)
@@ -68,7 +71,7 @@ func NewHTTPServer(cfg Config, store *Store, logger *slog.Logger) http.Handler {
 		mux.Handle("/downloads/", http.StripPrefix("/downloads/", http.FileServer(http.Dir(cfg.DownloadDir))))
 	}
 	mux.Handle("/", s.spaHandler())
-	return s.recoverer(s.securityHeaders(s.requestLog(mux)))
+	return s.recoverer(s.securityHeaders(s.requestLog(s.rateLimit(mux))))
 }
 
 func (s *HTTPServer) health(w http.ResponseWriter, _ *http.Request) {
@@ -115,6 +118,10 @@ func (s *HTTPServer) login(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *HTTPServer) clientRegister(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.IdentitySecret != "" {
+		writeError(w, 403, "请使用 Fribench 统一账号登录，不再单独注册")
+		return
+	}
 	var input struct {
 		Username        string `json:"username"`
 		DisplayName     string `json:"displayName"`
@@ -144,6 +151,10 @@ func (s *HTTPServer) clientRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *HTTPServer) clientLogin(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.IdentitySecret != "" {
+		writeError(w, 403, "请使用系统浏览器连接 Fribench")
+		return
+	}
 	var input struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
@@ -169,6 +180,10 @@ func (s *HTTPServer) clientLogin(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *HTTPServer) clientRecover(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.IdentitySecret != "" {
+		writeError(w, 403, "请在账号中心管理账号；加密密钥只能在本机恢复")
+		return
+	}
 	var input struct {
 		Username        string `json:"username"`
 		Password        string `json:"password"`
@@ -237,6 +252,10 @@ func writeClientAccount(
 	status int,
 	account ClientAccount,
 ) {
+	if account.KeySalt == "recovery-v1" {
+		account.User.Username = "Fribench"
+		account.User.Email = ""
+	}
 	writeJSON(w, status, map[string]any{
 		"user":             account.User,
 		"accessToken":      account.Session.AccessToken,
@@ -443,6 +462,13 @@ type uploadMetadata struct {
 }
 
 func (s *HTTPServer) uploadHandoff(w http.ResponseWriter, r *http.Request) {
+	select {
+	case s.uploads <- struct{}{}:
+		defer func() { <-s.uploads }()
+	default:
+		writeError(w, 429, "当前上传较多，请稍后重试；本地快照仍然保留")
+		return
+	}
 	defer r.Body.Close()
 	r.Body = http.MaxBytesReader(w, r.Body, s.cfg.MaxUploadBytes+uploadMultipartOverheadBytes)
 	reader, err := r.MultipartReader()
@@ -538,7 +564,27 @@ func (s *HTTPServer) uploadHandoff(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "加密 blob 为空")
 		return
 	}
-	handoff, err := s.store.CreateHandoff(CreateHandoffParams{
+	file, err := os.Open(absolutePath)
+	if err != nil {
+		cleanupBlob()
+		s.internalError(w, err)
+		return
+	}
+	digest := sha256.New()
+	_, err = io.Copy(digest, file)
+	file.Close()
+	if err != nil {
+		cleanupBlob()
+		s.internalError(w, err)
+		return
+	}
+	stage := r.Header.Get("X-Fribench-Guest-Stage")
+	if stage != "" && r.Header.Get("X-Fribench-Confirm") != "true" {
+		cleanupBlob()
+		writeError(w, 400, "请先确认游客绑定预览")
+		return
+	}
+	handoff, duplicate, err := s.store.createOwnedHandoff(CreateHandoffParams{
 		UserID:           user.ID,
 		ProjectName:      metadata.ProjectName,
 		WorkspaceKey:     metadata.WorkspaceKey,
@@ -547,11 +593,14 @@ func (s *HTTPServer) uploadHandoff(w http.ResponseWriter, r *http.Request) {
 		Manifest:         metadata.Manifest,
 		BlobPath:         relativePath,
 		BlobSize:         size,
-	})
+	}, stage, hex.EncodeToString(digest.Sum(nil)))
 	if err != nil {
 		_ = os.Remove(absolutePath)
-		s.internalError(w, err)
+		writeError(w, http.StatusConflict, "快照保存失败或空间不足；本地原始文件保留，请重试")
 		return
+	}
+	if duplicate {
+		cleanupBlob()
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"handoff": handoff})
 }
@@ -596,6 +645,26 @@ func (s *HTTPServer) claimHandoff(w http.ResponseWriter, r *http.Request) {
 
 func (s *HTTPServer) withSession(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.cfg.IdentitySecret != "" {
+			if r.Method != "GET" && r.Method != "HEAD" && r.Header.Get("Origin") != s.cfg.PublicURL {
+				writeError(w, 403, "请从本站页面重新操作")
+				return
+			}
+			if _, cookieErr := r.Cookie("__Host-fribench_codex_continuity"); cookieErr == nil {
+				sub, name, identityErr := s.platformIdentity(r, nil)
+				if identityErr != nil {
+					writeError(w, 401, "统一登录已失效")
+					return
+				}
+				user, identityErr := s.store.unifiedUser(sub, name)
+				if identityErr != nil {
+					s.internalError(w, identityErr)
+					return
+				}
+				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userContextKey, user)))
+				return
+			}
+		}
 		cookie, err := r.Cookie("continuity_session")
 		if err != nil || cookie.Value == "" {
 			writeError(w, http.StatusUnauthorized, "请先登录")

@@ -1,4 +1,4 @@
-FROM node:24-bookworm-slim AS web-build
+FROM node:24.21.0-bookworm-slim AS web-build
 
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
@@ -6,14 +6,14 @@ RUN npm ci
 COPY web ./
 RUN npm run build
 
-FROM golang:1.26.5-alpine AS go-build
+FROM golang:1.27.2-alpine AS go-build
 
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/continuity-server ./cmd/continuity-server
+RUN go test ./... && go vet ./... && CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/continuity-server ./cmd/continuity-server
 
 FROM alpine:3.23
 

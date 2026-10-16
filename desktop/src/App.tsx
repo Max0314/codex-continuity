@@ -102,6 +102,7 @@ function pageFromHash(): PageName {
 
 function DesktopApp() {
   const [auth, setAuth] = useState<AuthStatus | null>(null)
+  const [guestMode, setGuestMode] = useState(false)
   const [snapshot, setSnapshot] = useState<DashboardSnapshot | null>(null)
   const [page, setPage] = useState<PageName>(pageFromHash)
   const [sidebarOpen, setSidebarOpen] = useState(false)
@@ -134,7 +135,7 @@ function DesktopApp() {
           authenticated: false,
           username: '',
           displayName: '',
-          serverUrl: 'http://1.14.72.50:24001',
+          serverUrl: 'https://continuity.fribench.cn',
           legacyAccountAvailable: false,
           transportSecure: false,
         })
@@ -197,11 +198,13 @@ function DesktopApp() {
   }
 
   if (!auth) return <LoadingScreen label="正在检查账号状态…" />
-  if (!auth.authenticated) {
+  if ((!auth.authenticated && !guestMode) || (auth.authenticated && auth.encryptionUnlocked === false)) {
     return (
-      <AccountGate
+      <UnifiedGate
         initial={auth}
+        onGuest={async()=>{setGuestMode(true);await reload()}}
         onAuthenticated={async (result) => {
+          setGuestMode(false)
           setAuth(result.status)
           setToast({ tone: 'success', text: result.message })
           await reload()
@@ -263,6 +266,7 @@ function DesktopApp() {
       />
       {sidebarOpen ? <button className="sidebar-scrim" aria-label="关闭导航" onClick={() => setSidebarOpen(false)} /> : null}
       <main className="desktop-main">
+        {guestMode ? <div className="account-warning"><span>本机模式 · 不上传会话，云端存档可按需登录。</span><button onClick={()=>setGuestMode(false)}>连接 Fribench</button></div> : null}
         {page === 'conversations' ? (
           <ConversationsPage
             snapshot={snapshot}
@@ -310,6 +314,7 @@ function DesktopApp() {
               desktopApi.logoutAccount,
               (result) => {
                 setAuth({ ...auth, authenticated: false, username: '', displayName: '' })
+                setGuestMode(false)
                 setSnapshot(null)
                 setToast({ tone: 'success', text: result.message })
               },
@@ -333,6 +338,15 @@ function LoadingScreen({ label = '正在读取本机 Codex 会话…' }: { label
       <p>{label}</p>
     </div>
   )
+}
+
+function UnifiedGate({initial,onGuest,onAuthenticated}:{initial:AuthStatus;onGuest:()=>Promise<void>;onAuthenticated:(result:AuthActionResult)=>Promise<void>}) {
+ const [busy,setBusy]=useState(false),[error,setError]=useState(''),[key,setKey]=useState(''),[result,setResult]=useState<AuthActionResult|null>(null),[legacy,setLegacy]=useState(false)
+ if(legacy)return <AccountGate initial={initial} onAuthenticated={onAuthenticated}/>
+ if(result?.recoveryKey)return <div className="account-gate"><section className="account-card recovery-card"><h1>保存你的恢复密钥</h1><p>新设备首次解密历史快照需要这串密钥。服务器没有明文密钥，无法替你找回。</p><div className="recovery-key-box"><code>{result.recoveryKey}</code><CopyButton text={result.recoveryKey} label="复制恢复密钥"/></div><button className="primary-button" onClick={()=>onAuthenticated(result)}>我已离线保存，继续</button></section></div>
+ const locked=initial.authenticated||result?.status.authenticated
+ async function action(){setBusy(true);setError('');try{const next=locked?await desktopApi.unlockAccount(key):await desktopApi.connectAccount();if(next.recoveryKey||next.status.encryptionUnlocked===false)setResult(next);else await onAuthenticated(next)}catch(e){setError(errorMessage(e))}finally{setBusy(false)}}
+ return <div className="account-gate"><section className="account-card recovery-card"><BrandMark/><span className="account-kicker">FRIBENCH · CONTINUITY</span><h1>{locked?'解锁你的加密快照':'在每台设备上，接着上次的工作。'}</h1><p>{locked?'账号已连接。请输入之前保存的恢复密钥；验证在本机完成，密钥不上传。':'使用系统浏览器识别已有登录态。连接账号不会自动上传已有会话；本机浏览与离线功能无需登录。'}</p>{locked?<input value={key} onChange={e=>setKey(e.target.value)} placeholder="恢复密钥" autoComplete="off"/>:null}{error?<p role="alert">{error}</p>:null}<button className="primary-button" disabled={busy} onClick={action}>{busy?'请在浏览器完成连接…':locked?'解锁本机':'连接 Fribench 账号'}</button>{!locked?<><button className="secondary-button" onClick={onGuest}>先使用本机模式</button><button className="account-link-button" onClick={()=>setLegacy(true)}>自托管旧版服务</button></>:null}</section></div>
 }
 
 function AccountGate({
@@ -1048,6 +1062,13 @@ function SyncPage({ snapshot, busy, onSync, onAutoSync, onExportDiagnostics }: {
   )
 }
 
+function GuestClaimPanel({authenticated}:{authenticated:boolean}){
+ const [preview,setPreview]=useState(''),[error,setError]=useState(''),[busy,setBusy]=useState(false)
+ async function run(confirm:boolean){setBusy(true);setError('');try{const text=await desktopApi.guestArchive(confirm);setPreview(confirm?'':text);if(confirm)setError(text)}catch(e){setError(errorMessage(e))}finally{setBusy(false)}}
+ if(!authenticated)return null
+ return <section className="account-warning"><div><strong>本服务一次游客存档绑定</strong><p>按当前范围打包旧会话。预览不上传、不占机会；确认成功才绑定，本机原件不会删除。</p>{error?<p role="status">{error}</p>:null}{preview?<><p>{preview}</p><button type="button" disabled={busy} onClick={()=>run(true)}>确认绑定这些快照</button><button type="button" disabled={busy} onClick={async()=>{await desktopApi.cancelGuestPreview();setPreview('')}}>取消</button></>:<button type="button" disabled={busy} onClick={()=>run(false)}>{busy?'正在准备…':'预览游客存档'}</button>}</div></section>
+}
+
 function SettingsPage({ auth, settings, projects, busy, onRun, onSaved, onLogout, onToast }: {
   auth: AuthStatus
   settings: PublicSettings
@@ -1151,6 +1172,7 @@ function SettingsPage({ auth, settings, projects, busy, onRun, onSaved, onLogout
       <form className="settings-layout" onSubmit={submit}>
         <section className="panel settings-form">
           <PanelHeader title="设备与工作区" />
+          <GuestClaimPanel authenticated={auth.authenticated}/>
           <div className="account-settings-strip">
             <span className="account-settings-avatar"><UserRound size={20} /></span>
             <div><strong>{auth.displayName || auth.username}</strong><small>@{auth.username} · 同一账号可在多台设备登录</small></div>

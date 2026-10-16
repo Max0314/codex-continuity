@@ -23,7 +23,7 @@ var (
 )
 
 type Store struct {
-	db      *sql.DB
+	db      *database
 	dataDir string
 }
 
@@ -67,11 +67,20 @@ func OpenStore(cfg Config) (*Store, error) {
 	}
 	dbPath := filepath.Join(cfg.DataDir, "continuity.db")
 	dsn := "file:" + filepath.ToSlash(dbPath) + "?_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"
-	db, err := sql.Open("sqlite", dsn)
+	driver := "sqlite"
+	if cfg.DatabaseURL != "" {
+		driver = "pgx"
+		dsn = cfg.DatabaseURL
+	}
+	raw, err := sql.Open(driver, dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
+	db := &database{DB: raw, postgres: driver == "pgx"}
 	db.SetMaxOpenConns(1)
+	if db.postgres {
+		db.SetMaxOpenConns(8)
+	}
 	store := &Store{db: db, dataDir: cfg.DataDir}
 	if err := store.migrate(); err != nil {
 		db.Close()
@@ -170,12 +179,16 @@ CREATE INDEX IF NOT EXISTS idx_handoffs_user_created ON handoffs(user_id, create
 		{"users", "key_salt", "TEXT NOT NULL DEFAULT ''"},
 		{"users", "wrapped_key", "TEXT NOT NULL DEFAULT ''"},
 		{"users", "recovery_key_hash", "TEXT NOT NULL DEFAULT ''"},
+		{"users", "external_subject", "TEXT"},
 	} {
 		if err := s.ensureColumn(column.table, column.name, column.definition); err != nil {
 			return fmt.Errorf("migrate sqlite column %s.%s: %w", column.table, column.name, err)
 		}
 	}
 	if _, err := s.db.Exec(`
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_external_subject ON users(external_subject);
+CREATE TABLE IF NOT EXISTS continuity_guest_stages(id TEXT PRIMARY KEY,user_id TEXT NOT NULL REFERENCES users(id),guest_hash TEXT NOT NULL,digest TEXT NOT NULL,size BIGINT NOT NULL,expires_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS continuity_guest_claims(user_id TEXT PRIMARY KEY REFERENCES users(id),guest_hash TEXT NOT NULL UNIQUE,stage_id TEXT NOT NULL,handoff_id TEXT NOT NULL,digest TEXT NOT NULL,size BIGINT NOT NULL,created_at TEXT NOT NULL);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username
 ON users(username COLLATE NOCASE) WHERE username<>''`); err != nil {
 		return fmt.Errorf("migrate username index: %w", err)
@@ -184,6 +197,17 @@ ON users(username COLLATE NOCASE) WHERE username<>''`); err != nil {
 }
 
 func (s *Store) ensureColumn(table, name, definition string) error {
+	if s.db.postgres {
+		var exists bool
+		if err := s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=? AND column_name=?)", table, name).Scan(&exists); err != nil {
+			return err
+		}
+		if exists {
+			return nil
+		}
+		_, err := s.db.Exec("ALTER TABLE " + table + " ADD COLUMN " + name + " " + definition)
+		return err
+	}
 	rows, err := s.db.Query("PRAGMA table_info(" + table + ")")
 	if err != nil {
 		return err
@@ -572,10 +596,14 @@ func (s *Store) RefreshClientSession(
 		return ClientAccount{}, err
 	}
 	defer tx.Rollback()
-	row := tx.QueryRow(`
+	query := `
 SELECT u.id,u.username,u.email,u.display_name,u.role,u.created_at,u.key_salt,u.wrapped_key
 FROM client_sessions s JOIN users u ON u.id=s.user_id
-WHERE s.refresh_hash=? AND s.refresh_expires_at>?`, refreshHash, nowText())
+WHERE s.refresh_hash=? AND s.refresh_expires_at>?`
+	if tx.postgres {
+		query += " FOR UPDATE OF s"
+	}
+	row := tx.QueryRow(query, refreshHash, nowText())
 	var account ClientAccount
 	var created string
 	if err := row.Scan(

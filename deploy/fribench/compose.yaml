@@ -3,9 +3,9 @@ name: codex-continuity
 services:
   continuity:
     build:
-      context: .
-      dockerfile: Dockerfile.runtime
-    image: codex-continuity:0.4.2-fribench
+      context: ../..
+      dockerfile: Dockerfile
+    image: fribench-codex-continuity:${CONTINUITY_VERSION:?Set full source commit}
     container_name: codex-continuity
     restart: unless-stopped
     init: true
@@ -14,12 +14,28 @@ services:
       - "127.0.0.1:24001:8080"
     env_file:
       - /srv/fribench/tools/codex-continuity/shared/.env
+      - /etc/fribench/apps/codex-continuity/app.env
     environment:
       CONTINUITY_ADDR: ":8080"
       CONTINUITY_DATA_DIR: "/data"
       CONTINUITY_WEB_DIR: "/app/web"
       CONTINUITY_DOWNLOAD_DIR: "/downloads"
       CONTINUITY_MAX_UPLOAD_MIB: "500"
+      CONTINUITY_PUBLIC_URL: "https://continuity.fribench.cn"
+      CONTINUITY_COOKIE_SECURE: "true"
+      CONTINUITY_TRUST_PROXY: "true"
+    networks: [backend, identity]
+    mem_limit: 256m
+    cpus: 0.50
+    pids_limit: 100
+    healthcheck:
+      test: [CMD, wget, -qO-, http://127.0.0.1:8080/api/v1/health]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options: {max-size: 5m, max-file: "2"}
     volumes:
       - /srv/fribench/tools/codex-continuity/shared/data:/data
       - /srv/fribench/tools/codex-continuity/shared/downloads:/downloads:ro
@@ -30,3 +46,6 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+networks:
+  backend: {external: true, name: fribench-backend}
+  identity: {external: true, name: fribench-services-edge-v1}

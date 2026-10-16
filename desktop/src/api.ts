@@ -20,7 +20,7 @@ const isTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window
 const now = () => new Date().toISOString()
 
 let currentSettings: PublicSettings = {
-  serverUrl: 'http://1.14.72.50:24001',
+  serverUrl: 'https://continuity.fribench.cn',
   root: 'D:\\code_CPL',
   deviceName: '公司电脑',
   deviceId: 'mac_demo',
@@ -253,6 +253,10 @@ async function chooseDiagnosticReport() {
 }
 
 export const desktopApi = {
+  connectAccount: () => invoke<AuthActionResult>('connect_account'),
+  unlockAccount: (recoveryKey: string) => invoke<AuthActionResult>('unlock_account', { recoveryKey }),
+  guestArchive: (confirm: boolean) => invoke<string>('guest_archive', { confirm }),
+  cancelGuestPreview: () => invoke<void>('cancel_guest_preview'),
   authStatus: () =>
     isTauri ? invoke<AuthStatus>('get_auth_status') : mockDelay(mockAuthStatus, 180),
 

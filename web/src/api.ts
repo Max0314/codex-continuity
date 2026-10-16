@@ -21,7 +21,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ identifier, password }),
     }),
-  logout: () => request<void>('/auth/logout', { method: 'POST' }),
+  logout: async () => {
+    const session=await fetch('/_fribench/auth/session',{credentials:'same-origin',cache:'no-store'}).then(r=>r.json()).catch(()=>null)
+    if(session?.authenticated){await fetch('/_fribench/auth/logout',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json'},body:JSON.stringify({csrf:session.csrf})});location.reload();return}
+    return request<void>('/auth/logout', { method: 'POST' })
+  },
   me: () => request<{ user: User }>('/me'),
   overview: () => request<Overview>('/overview'),
   devices: () => request<{ devices: Device[] }>('/devices'),
