@@ -51,6 +51,7 @@ func NewHTTPServer(cfg Config, store *Store, logger *slog.Logger) http.Handler {
 	mux.HandleFunc("POST /api/v1/client/auth/logout", s.clientLogout)
 	mux.Handle("POST /api/v1/auth/logout", s.withSession(http.HandlerFunc(s.logout)))
 	mux.Handle("GET /api/v1/me", s.withSession(http.HandlerFunc(s.me)))
+	mux.Handle("POST /api/v1/client-sessions/revoke", s.withSession(http.HandlerFunc(s.revokeClients)))
 	mux.Handle("GET /api/v1/overview", s.withSession(http.HandlerFunc(s.overview)))
 	mux.Handle("GET /api/v1/devices", s.withSession(http.HandlerFunc(s.devices)))
 	mux.Handle("GET /api/v1/handoffs", s.withSession(http.HandlerFunc(s.handoffs)))

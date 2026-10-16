@@ -910,6 +910,13 @@ async fn ensure_access_token(settings: &SettingsFile) -> Result<String, String> 
         .send()
         .await
         .map_err(|error| format!("刷新登录状态失败：{error}"))?;
+    if response.status() == StatusCode::UNAUTHORIZED {
+        if load_auth_session().is_some_and(|s| s.refresh_token == session.refresh_token) {
+            delete_secret(AUTH_SESSION_SECRET);
+            delete_secret("api-token");
+        }
+        return Err("此设备登录已撤销，请重新连接 Fribench；本机密钥和存档保留".into());
+    }
     let envelope = parse_auth_response(response).await?;
     if !load_auth_session()
         .is_some_and(|s| s.user.id == session.user.id && s.refresh_token == session.refresh_token)

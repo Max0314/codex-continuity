@@ -119,7 +119,9 @@ function DesktopApp() {
     const generation=contextGeneration.current
     try {
       const next = await desktopApi.dashboard()
+      const nextAuth=await desktopApi.authStatus()
       if(generation!==contextGeneration.current)return
+      setAuth(nextAuth)
       setSnapshot(next)
       document.documentElement.dataset.theme = next.settings.theme
     } catch (error) {

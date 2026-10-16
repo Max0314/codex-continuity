@@ -27,6 +27,7 @@ export const api = {
     return request<void>('/auth/logout', { method: 'POST' })
   },
   me: () => request<{ user: User }>('/me'),
+  revokeClients: () => request<void>('/client-sessions/revoke',{method:'POST',body:JSON.stringify({confirm:true})}),
   overview: () => request<Overview>('/overview'),
   devices: () => request<{ devices: Device[] }>('/devices'),
   handoffs: () => request<{ handoffs: Handoff[] }>('/handoffs'),

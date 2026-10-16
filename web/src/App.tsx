@@ -853,6 +853,7 @@ function DownloadsPage() {
 }
 
 function SettingsPage({ theme, setTheme }: { theme: ThemeName; setTheme: (theme: ThemeName) => void }) {
+  const [revokeNotice,setRevokeNotice]=useState('')
   return (
     <>
       <PageHeader eyebrow="系统" title="设置" description="调整界面外观并查看当前安全策略" />
@@ -875,6 +876,9 @@ function SettingsPage({ theme, setTheme }: { theme: ThemeName; setTheme: (theme:
             <SecurityRow title="客户端授权" value="按设备创建、随时撤销的令牌" />
             <SecurityRow title="数据隔离" value="按用户强制隔离" />
             <SecurityRow title="网络建议" value="HTTPS 或私有 VPN / Tailscale" />
+            <p>浏览器和桌面设备的会话独立。需要时可以撤销本账号所有桌面会话与 API 令牌；不删除快照或恢复密钥。</p>
+            <button className="secondary-button" onClick={async()=>{if(!confirm('退出本账号所有桌面设备并撤销 API 令牌？快照不会删除。'))return;try{await api.revokeClients();setRevokeNotice('所有桌面凭据已撤销；下次同步需重新连接。')}catch(e){setRevokeNotice(e instanceof Error?e.message:'撤销失败，请重试')}}}>退出所有桌面设备</button>
+            {revokeNotice?<p role="status">{revokeNotice}</p>:null}
           </div>
         </Panel>
         <Panel title="产品边界">

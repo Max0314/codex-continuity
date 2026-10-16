@@ -190,6 +190,36 @@ func lockUploads(tx *transaction) error {
 	return nil
 }
 
+func (s *HTTPServer) revokeClients(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Confirm bool `json:"confirm"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	if !input.Confirm {
+		writeError(w, 400, "请先确认退出所有桌面设备")
+		return
+	}
+	tx, err := s.store.db.Begin()
+	if err != nil {
+		s.internalError(w, err)
+		return
+	}
+	defer tx.Rollback()
+	for _, table := range []string{"client_sessions", "api_tokens"} {
+		if _, err = tx.Exec("DELETE FROM "+table+" WHERE user_id=?", currentUser(r).ID); err != nil {
+			s.internalError(w, err)
+			return
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		s.internalError(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
 var errStorageConflict = errors.New("快照冲突或空间不足；原始本地数据未被修改")
 
 // A single transaction owns quota checks, the optional once-only claim and the

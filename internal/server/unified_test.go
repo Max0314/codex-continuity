@@ -166,4 +166,41 @@ func TestUnifiedPostgresIsolationAndOnceClaim(t *testing.T) {
 	if _, err = store.UserByClientAccessToken(rotated.Session.AccessToken); err == nil {
 		t.Fatal("revoked access still accepted")
 	}
+	deviceSession, err := store.CreateClientSession(same.ID, time.Minute, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherSession, err := store.CreateClientSession(other.ID, time.Minute, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoke, _ := http.NewRequest("POST", handler.URL+"/api/v1/client-sessions/revoke", strings.NewReader(`{"confirm":true}`))
+	revoke.Header.Set("Content-Type", "application/json")
+	revoke.AddCookie(&http.Cookie{Name: "__Host-fribench_codex_continuity", Value: "fixture-cookie"})
+	res, err = http.DefaultClient.Do(revoke)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != 403 {
+		t.Fatal("originless revocation accepted")
+	}
+	revoke, _ = http.NewRequest("POST", handler.URL+"/api/v1/client-sessions/revoke", strings.NewReader(`{"confirm":true}`))
+	revoke.Header.Set("Content-Type", "application/json")
+	revoke.Header.Set("Origin", cfg.PublicURL)
+	revoke.AddCookie(&http.Cookie{Name: "__Host-fribench_codex_continuity", Value: "fixture-cookie"})
+	res, err = http.DefaultClient.Do(revoke)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != 200 {
+		t.Fatal("own revocation failed")
+	}
+	if _, err = store.UserByClientAccessToken(deviceSession.AccessToken); err == nil {
+		t.Fatal("revoked desktop active")
+	}
+	if _, err = store.UserByClientAccessToken(otherSession.AccessToken); err != nil {
+		t.Fatal("other account revoked", err)
+	}
 }
