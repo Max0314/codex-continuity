@@ -7,6 +7,7 @@ COPY web ./
 RUN npm run build
 
 FROM golang:1.27.2-alpine AS go-build
+ENV GOPROXY=https://goproxy.cn,direct
 
 WORKDIR /src
 COPY go.mod go.sum ./
@@ -17,7 +18,8 @@ RUN go test ./... && go vet ./... && CGO_ENABLED=0 GOOS=linux go build -trimpath
 
 FROM alpine:3.23
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN sed -i 's|https://dl-cdn.alpinelinux.org/alpine|https://mirrors.cloud.tencent.com/alpine|g' /etc/apk/repositories \
+    && apk add --no-cache ca-certificates tzdata
 WORKDIR /app
 COPY --from=go-build /out/continuity-server /app/continuity-server
 COPY --from=web-build /src/web/dist /app/web
