@@ -228,6 +228,10 @@ func (s *HTTPServer) clientRefresh(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
+	if err := s.checkUnifiedSession(r, input.RefreshToken, true); err != nil {
+		writeError(w, 401, "授权已失效，请重新连接 Fribench；原文件与密钥保留")
+		return
+	}
 	account, err := s.store.RefreshClientSession(
 		input.RefreshToken,
 		s.cfg.ClientAccessTTL,
@@ -658,7 +662,7 @@ func (s *HTTPServer) withSession(next http.Handler) http.Handler {
 				return
 			}
 			if _, cookieErr := r.Cookie("__Host-fribench_codex_continuity"); cookieErr == nil {
-				sub, name, identityErr := s.platformIdentity(r, nil)
+				sub, name, _, identityErr := s.platformIdentity(r, nil)
 				if identityErr != nil {
 					writeError(w, 401, "统一登录已失效")
 					return
@@ -704,6 +708,10 @@ func (s *HTTPServer) withClientAuth(next http.Handler) http.Handler {
 			return
 		}
 		token := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
+		if err := s.checkUnifiedSession(r, token, false); err != nil {
+			writeError(w, 401, "授权已失效，请重新连接 Fribench；原文件与密钥保留")
+			return
+		}
 		user, err := s.store.UserByClientAccessToken(token)
 		if err != nil {
 			user, err = s.store.UserByAPIToken(token)

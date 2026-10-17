@@ -44,8 +44,12 @@ func TestUnifiedPostgresIsolationAndOnceClaim(t *testing.T) {
 			w.WriteHeader(401)
 			return
 		}
+		if strings.HasSuffix(r.URL.Path, "/account-state") {
+			json.NewEncoder(w).Encode(map[string]any{"active":true,"security_version":strings.Repeat("s",43)})
+			return
+		}
 		if strings.HasSuffix(r.URL.Path, "/exchange") {
-			json.NewEncoder(w).Encode(map[string]string{"sub": "fixture-account-a", "name": "甲"})
+			json.NewEncoder(w).Encode(map[string]string{"sub": "fixture-account-a", "name": "甲","security_version":strings.Repeat("s",43)})
 			return
 		}
 		cookie, e := r.Cookie("__Host-fribench_codex_continuity")

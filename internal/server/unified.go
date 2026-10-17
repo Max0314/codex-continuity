@@ -16,7 +16,7 @@ import (
 
 // Identities are obtained only from the protected platform endpoint. Never
 // accept a subject/account ID or forwarded identity headers from the browser.
-func (s *HTTPServer) platformIdentity(r *http.Request, grant any) (string, string, error) {
+func (s *HTTPServer) platformIdentity(r *http.Request, grant any) (string, string, string, error) {
 	endpoint := s.cfg.IdentityEndpoint
 	body := []byte(`{}`)
 	if grant != nil {
@@ -27,7 +27,7 @@ func (s *HTTPServer) platformIdentity(r *http.Request, grant any) (string, strin
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	req.Host = "continuity.fribench.cn"
 	req.Header.Set("X-Fribench-App", "codex-continuity")
@@ -36,31 +36,32 @@ func (s *HTTPServer) platformIdentity(r *http.Request, grant any) (string, strin
 	if grant == nil {
 		cookie, err := r.Cookie("__Host-fribench_codex_continuity")
 		if err != nil {
-			return "", "", ErrNotFound
+			return "", "", "", ErrNotFound
 		}
 		req.AddCookie(cookie)
 	}
 	client := &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return "", "", ErrNotFound
+		return "", "", "", ErrNotFound
 	}
 	var identity struct {
-		Sub           string `json:"sub"`
-		Name          string `json:"name"`
-		Authenticated bool   `json:"authenticated"`
+		Sub             string `json:"sub"`
+		SecurityVersion string `json:"security_version"`
+		Name            string `json:"name"`
+		Authenticated   bool   `json:"authenticated"`
 	}
 	if json.NewDecoder(io.LimitReader(resp.Body, 8192)).Decode(&identity) != nil || identity.Sub == "" || len(identity.Sub) > 200 {
-		return "", "", ErrNotFound
+		return "", "", "", ErrNotFound
 	}
 	if grant == nil && !identity.Authenticated {
-		return "", "", ErrNotFound
+		return "", "", "", ErrNotFound
 	}
-	return identity.Sub, identity.Name, nil
+	return identity.Sub, identity.Name, identity.SecurityVersion, nil
 }
 
 func (s *Store) unifiedUser(sub, name string) (model.User, error) {
@@ -96,8 +97,8 @@ func (s *HTTPServer) unifiedLogin(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, "密钥指纹无效")
 		return
 	}
-	sub, name, err := s.platformIdentity(r, map[string]string{"code": input.Code, "code_verifier": input.Verifier, "redirect_uri": input.Redirect})
-	if err != nil {
+	sub, name, version, err := s.platformIdentity(r, map[string]string{"code": input.Code, "code_verifier": input.Verifier, "redirect_uri": input.Redirect})
+	if err != nil || len(version) != 43 {
 		writeError(w, 401, "连接已过期，请重新从客户端发起")
 		return
 	}
@@ -122,7 +123,56 @@ func (s *HTTPServer) unifiedLogin(w http.ResponseWriter, r *http.Request) {
 		s.internalError(w, err)
 		return
 	}
+	if _, err = s.store.db.Exec("UPDATE client_sessions SET security_version=? WHERE access_hash=?", version, tokenDigest(session.AccessToken)); err != nil {
+		s.internalError(w, err)
+		return
+	}
 	writeClientAccount(w, r, 200, ClientAccount{User: user, KeySalt: "recovery-v1", WrappedKey: keyHash, Session: session})
+}
+
+// Compare the authorization issued to this session, not the user's most recent login.
+// Reconnecting one device must never reactivate a different device's old token.
+func (s *HTTPServer) checkUnifiedSession(r *http.Request, token string, refresh bool) error {
+	if s.cfg.IdentitySecret == "" {
+		return nil
+	}
+	column := "access_hash"
+	if refresh {
+		column = "refresh_hash"
+	}
+	var sub, version string
+	if err := s.store.db.QueryRow("SELECT COALESCE(u.external_subject,''),s.security_version FROM client_sessions s JOIN users u ON u.id=s.user_id WHERE s."+column+"=?", tokenDigest(token)).Scan(&sub, &version); err != nil || sub == "" || len(version) != 43 {
+		return ErrNotFound
+	}
+	body, _ := json.Marshal(map[string]string{"sub": sub})
+	ctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimSuffix(s.cfg.IdentityEndpoint, "/identity")+"/desktop/account-state", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Host = "continuity.fribench.cn"
+	req.Header.Set("X-Fribench-App", "codex-continuity")
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBasicAuth("fribench-codex-continuity", s.cfg.IdentitySecret)
+	client := &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	var state struct {
+		Active  bool   `json:"active"`
+		Version string `json:"security_version"`
+	}
+	if response.StatusCode != 200 || json.NewDecoder(io.LimitReader(response.Body, 8192)).Decode(&state) != nil {
+		return ErrNotFound
+	}
+	if !state.Active || state.Version != version {
+		_, _ = s.store.db.Exec("DELETE FROM client_sessions WHERE "+column+"=?", tokenDigest(token))
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *HTTPServer) guestPreview(w http.ResponseWriter, r *http.Request) {

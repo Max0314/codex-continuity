@@ -180,6 +180,7 @@ CREATE INDEX IF NOT EXISTS idx_handoffs_user_created ON handoffs(user_id, create
 		{"users", "wrapped_key", "TEXT NOT NULL DEFAULT ''"},
 		{"users", "recovery_key_hash", "TEXT NOT NULL DEFAULT ''"},
 		{"users", "external_subject", "TEXT"},
+		{"client_sessions", "security_version", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := s.ensureColumn(column.table, column.name, column.definition); err != nil {
 			return fmt.Errorf("migrate sqlite column %s.%s: %w", column.table, column.name, err)
@@ -597,7 +598,7 @@ func (s *Store) RefreshClientSession(
 	}
 	defer tx.Rollback()
 	query := `
-SELECT u.id,u.username,u.email,u.display_name,u.role,u.created_at,u.key_salt,u.wrapped_key
+SELECT u.id,u.username,u.email,u.display_name,u.role,u.created_at,u.key_salt,u.wrapped_key,s.security_version
 FROM client_sessions s JOIN users u ON u.id=s.user_id
 WHERE s.refresh_hash=? AND s.refresh_expires_at>?`
 	if tx.postgres {
@@ -606,10 +607,12 @@ WHERE s.refresh_hash=? AND s.refresh_expires_at>?`
 	row := tx.QueryRow(query, refreshHash, nowText())
 	var account ClientAccount
 	var created string
+	var securityVersion string
 	if err := row.Scan(
 		&account.User.ID, &account.User.Username, &account.User.Email,
 		&account.User.DisplayName, &account.User.Role, &created,
 		&account.KeySalt, &account.WrappedKey,
+		&securityVersion,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ClientAccount{}, ErrNotFound
@@ -637,12 +640,12 @@ WHERE s.refresh_hash=? AND s.refresh_expires_at>?`
 	}
 	_, err = tx.Exec(`
 INSERT INTO client_sessions(
- id,user_id,access_hash,refresh_hash,access_expires_at,refresh_expires_at,last_used_at,created_at
-) VALUES(?,?,?,?,?,?,?,?)`,
+ id,user_id,access_hash,refresh_hash,access_expires_at,refresh_expires_at,last_used_at,created_at,security_version
+) VALUES(?,?,?,?,?,?,?,?,?)`,
 		newID(), account.User.ID, accessHash, nextRefreshHash,
 		account.Session.AccessExpiresAt.Format(time.RFC3339Nano),
 		account.Session.RefreshExpiresAt.Format(time.RFC3339Nano),
-		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),
+		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),securityVersion,
 	)
 	if err != nil {
 		return ClientAccount{}, err

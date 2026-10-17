@@ -104,6 +104,7 @@ export default function App() {
     const changed=()=>{setUser(null);setPage('overview');api.me().then(({user:current})=>setUser(current)).catch(()=>setUser(null))}
     window.addEventListener('fribench:account-change',changed)
     const script=document.createElement('script');script.src='/_fribench/client.js';script.defer=true;document.body.append(script)
+    const accountView=document.createElement('script');accountView.src='/_fribench/account-view.js';accountView.defer=true;document.body.append(accountView)
     return ()=>window.removeEventListener('fribench:account-change',changed)
   }, [])
 
@@ -355,6 +356,7 @@ function Header({
                 <strong>{user.displayName}</strong>
                 <small>{user.username ? `@${user.username}` : user.email}</small>
               </div>
+              <a href="/_fribench/auth/manage?return_to=%2F" data-fribench-action="manage">资料、密码与安全 →</a>
               <button onClick={onLogout}>
                 <LogOut size={16} /> 退出登录
               </button>
