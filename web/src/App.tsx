@@ -193,7 +193,7 @@ function Login({
         </div>
         <div className="login-brand-copy">
           <span className="eyebrow">CODEX CONTINUITY</span>
-          <h1>让 Codex 会话在不同设备之间，安全延续。</h1>
+          <h1>在不同电脑间同步 Codex 会话。</h1>
           <p>自动同步工作区根目录关联的 Codex 会话快照。服务端只保存密文，不需要访问 Codex 或 OpenAI。</p>
           <div className="login-feature-list">
             <Feature icon={<ShieldCheck />} title="端到端加密" text="AES-256-GCM 加密后再上传" />
