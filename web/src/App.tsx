@@ -198,12 +198,12 @@ function Login({
           <div className="login-feature-list">
             <Feature icon={<ShieldCheck />} title="端到端加密" text="AES-256-GCM 加密后再上传" />
             <Feature icon={<RefreshCw />} title="自动同步与离线队列" text="无需逐项目、逐对话手动发布" />
-            <Feature icon={<Server />} title="团队设备管理" text="Docker Compose 私有部署" />
+            <Feature icon={<Server />} title="自建同步服务" text="Docker Compose 私有部署" />
           </div>
         </div>
         <div className="login-brand-footer">
           <span className="status-dot" />
-          数据始终由你掌控
+          密文存储于自建服务器
         </div>
       </section>
       <section className="login-form-panel">
@@ -224,7 +224,7 @@ function Login({
             <span>Codex Continuity</span>
           </div>
           <span className="form-kicker">欢迎回来</span>
-          <h2>继续你的工作</h2>
+          <h2>会话同步与客户端下载</h2>
           <p className="form-intro">客户端下载、功能介绍无需登录。连接 Fribench 后自动识别同一浏览器账号，快照与设备仅自己可见。</p>
           <a className="primary-button login-submit" href="/_fribench/auth/login?return_to=/">连接 Fribench 账号</a>
           <PublicDownload/>
