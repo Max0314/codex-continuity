@@ -3,6 +3,8 @@ export type Role = 'admin' | 'member'
 export interface User {
   id: string
   username?: string
+  avatarUrl?: string
+  unified?: boolean
   email: string
   displayName: string
   role: Role

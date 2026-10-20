@@ -1107,3 +1107,4 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .download-edition-footer { align-items: stretch; flex-direction: column; }
   .edition-download { width: 100%; }
 }
+.avatar img {border-radius:inherit;object-fit:cover;max-width:100%;}

@@ -645,7 +645,7 @@ INSERT INTO client_sessions(
 		newID(), account.User.ID, accessHash, nextRefreshHash,
 		account.Session.AccessExpiresAt.Format(time.RFC3339Nano),
 		account.Session.RefreshExpiresAt.Format(time.RFC3339Nano),
-		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano),securityVersion,
+		now.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano), securityVersion,
 	)
 	if err != nil {
 		return ClientAccount{}, err
@@ -1082,6 +1082,11 @@ func scanAuthenticatedUser(row interface{ Scan(...any) error }) (authenticatedUs
 		&u.KeySalt, &u.WrappedKey, &u.Role, &created,
 	)
 	u.CreatedAt = parseTime(created)
+	if strings.HasPrefix(u.ID, "fb_") && u.Username == u.ID && u.Email == u.ID+"@identity.invalid" {
+		u.Username = ""
+		u.Email = ""
+		u.Unified = true
+	}
 	return u, err
 }
 

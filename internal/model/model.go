@@ -17,6 +17,8 @@ type User struct {
 	DisplayName string    `json:"displayName"`
 	Role        string    `json:"role"`
 	CreatedAt   time.Time `json:"createdAt"`
+	AvatarURL   string    `json:"avatarUrl,omitempty"`
+	Unified     bool      `json:"unified,omitempty"`
 }
 
 type Device struct {

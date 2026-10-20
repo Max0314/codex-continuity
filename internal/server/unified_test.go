@@ -45,11 +45,11 @@ func TestUnifiedPostgresIsolationAndOnceClaim(t *testing.T) {
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/account-state") {
-			json.NewEncoder(w).Encode(map[string]any{"active":true,"security_version":strings.Repeat("s",43)})
+			json.NewEncoder(w).Encode(map[string]any{"active": true, "security_version": strings.Repeat("s", 43)})
 			return
 		}
 		if strings.HasSuffix(r.URL.Path, "/exchange") {
-			json.NewEncoder(w).Encode(map[string]string{"sub": "fixture-account-a", "name": "甲","security_version":strings.Repeat("s",43)})
+			json.NewEncoder(w).Encode(map[string]string{"sub": "fixture-account-a", "name": "甲", "security_version": strings.Repeat("s", 43)})
 			return
 		}
 		cookie, e := r.Cookie("__Host-fribench_codex_continuity")
@@ -57,7 +57,7 @@ func TestUnifiedPostgresIsolationAndOnceClaim(t *testing.T) {
 			w.WriteHeader(401)
 			return
 		}
-		json.NewEncoder(w).Encode(map[string]any{"authenticated": true, "sub": "fixture-account-a", "name": "甲"})
+		json.NewEncoder(w).Encode(map[string]any{"authenticated": true, "sub": "fixture-account-a", "name": "甲", "preferred_username": "Central_Bench", "picture": "https://auth.fribench.cn/assets/avatars/v1/bench-chill.webp"})
 	}))
 	defer provider.Close()
 	cfg.IdentityEndpoint = provider.URL + "/internal/identity"
@@ -97,9 +97,18 @@ func TestUnifiedPostgresIsolationAndOnceClaim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var profile struct {
+		User model.User `json:"user"`
+	}
+	if err = json.NewDecoder(res.Body).Decode(&profile); err != nil {
+		t.Fatal(err)
+	}
 	res.Body.Close()
 	if res.StatusCode != 200 {
 		t.Fatalf("central cookie status=%d", res.StatusCode)
+	}
+	if profile.User.Username != "Central_Bench" || !profile.User.Unified || profile.User.Email != "" || profile.User.AvatarURL == "" {
+		t.Fatalf("central display profile not propagated: username=%q unified=%v", profile.User.Username, profile.User.Unified)
 	}
 	device, err := store.UpsertDevice(same.ID, model.Device{ID: "fixture-device", Name: "fixture", OS: "test"})
 	if err != nil {

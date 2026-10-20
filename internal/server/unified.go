@@ -16,7 +16,20 @@ import (
 
 // Identities are obtained only from the protected platform endpoint. Never
 // accept a subject/account ID or forwarded identity headers from the browser.
+type identityProfile struct {
+	Sub             string `json:"sub"`
+	Name            string `json:"name"`
+	SecurityVersion string `json:"security_version"`
+	Username        string `json:"preferred_username"`
+	Picture         string `json:"picture"`
+	Authenticated   bool   `json:"authenticated"`
+}
+
 func (s *HTTPServer) platformIdentity(r *http.Request, grant any) (string, string, string, error) {
+	p, err := s.platformProfile(r, grant)
+	return p.Sub, p.Name, p.SecurityVersion, err
+}
+func (s *HTTPServer) platformProfile(r *http.Request, grant any) (identityProfile, error) {
 	endpoint := s.cfg.IdentityEndpoint
 	body := []byte(`{}`)
 	if grant != nil {
@@ -27,7 +40,7 @@ func (s *HTTPServer) platformIdentity(r *http.Request, grant any) (string, strin
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", "", "", err
+		return identityProfile{}, err
 	}
 	req.Host = "continuity.fribench.cn"
 	req.Header.Set("X-Fribench-App", "codex-continuity")
@@ -36,32 +49,30 @@ func (s *HTTPServer) platformIdentity(r *http.Request, grant any) (string, strin
 	if grant == nil {
 		cookie, err := r.Cookie("__Host-fribench_codex_continuity")
 		if err != nil {
-			return "", "", "", ErrNotFound
+			return identityProfile{}, ErrNotFound
 		}
 		req.AddCookie(cookie)
 	}
 	client := &http.Client{Timeout: 8 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", "", "", err
+		return identityProfile{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		return "", "", "", ErrNotFound
+		return identityProfile{}, ErrNotFound
 	}
-	var identity struct {
-		Sub             string `json:"sub"`
-		SecurityVersion string `json:"security_version"`
-		Name            string `json:"name"`
-		Authenticated   bool   `json:"authenticated"`
-	}
+	var identity identityProfile
 	if json.NewDecoder(io.LimitReader(resp.Body, 8192)).Decode(&identity) != nil || identity.Sub == "" || len(identity.Sub) > 200 {
-		return "", "", "", ErrNotFound
+		return identityProfile{}, ErrNotFound
 	}
 	if grant == nil && !identity.Authenticated {
-		return "", "", "", ErrNotFound
+		return identityProfile{}, ErrNotFound
 	}
-	return identity.Sub, identity.Name, identity.SecurityVersion, nil
+	if !strings.HasPrefix(identity.Picture, "https://auth.fribench.cn/assets/avatars/v1/") || !strings.HasSuffix(identity.Picture, ".webp") {
+		identity.Picture = ""
+	}
+	return identity, nil
 }
 
 func (s *Store) unifiedUser(sub, name string) (model.User, error) {

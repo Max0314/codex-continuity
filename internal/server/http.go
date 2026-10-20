@@ -343,6 +343,10 @@ func (s *HTTPServer) users(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *HTTPServer) createUser(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.IdentitySecret != "" {
+		writeError(w, 403, "统一账号模式请在 Fribench 账号中心注册；此处不创建独立账号")
+		return
+	}
 	var input struct {
 		Email       string `json:"email"`
 		DisplayName string `json:"displayName"`
@@ -662,16 +666,20 @@ func (s *HTTPServer) withSession(next http.Handler) http.Handler {
 				return
 			}
 			if _, cookieErr := r.Cookie("__Host-fribench_codex_continuity"); cookieErr == nil {
-				sub, name, _, identityErr := s.platformIdentity(r, nil)
+				profile, identityErr := s.platformProfile(r, nil)
 				if identityErr != nil {
 					writeError(w, 401, "统一登录已失效")
 					return
 				}
-				user, identityErr := s.store.unifiedUser(sub, name)
+				user, identityErr := s.store.unifiedUser(profile.Sub, profile.Name)
 				if identityErr != nil {
 					s.internalError(w, identityErr)
 					return
 				}
+				user.Username = profile.Username
+				user.Email = ""
+				user.AvatarURL = profile.Picture
+				user.Unified = true
 				next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), userContextKey, user)))
 				return
 			}

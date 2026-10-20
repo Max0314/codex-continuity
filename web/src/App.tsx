@@ -134,8 +134,8 @@ export default function App() {
       />
       {sidebarOpen && <button className="sidebar-scrim" aria-label="关闭菜单" onClick={() => setSidebarOpen(false)} />}
       <main className="main-content">
-        {page === 'overview' && <OverviewPage key={user.id} onNavigate={setPage} />}
-        {page === 'devices' && <DevicesPage />}
+        {page === 'overview' && <OverviewPage key={user.id} user={user} onNavigate={setPage} />}
+        {page === 'devices' && <DevicesPage onNavigate={setPage} />}
         {page === 'handoffs' && <HandoffsPage />}
         {page === 'users' && <UsersPage currentUser={user} />}
         {page === 'tokens' && <TokensPage />}
@@ -343,7 +343,7 @@ function Header({
         </div>
         <div className="account-menu">
           <button className="account-trigger" onClick={() => setAccountOpen((value) => !value)}>
-            <span className="avatar">{user.displayName.slice(0, 1)}</span>
+            <span className="avatar">{user.avatarUrl?<img src={user.avatarUrl} alt="" width="36" height="36"/>:user.displayName.slice(0, 1)}</span>
             <span className="account-copy">
               <strong>{user.displayName}</strong>
               <small>{user.role === 'admin' ? '管理员' : '成员'}</small>
@@ -354,7 +354,7 @@ function Header({
             <div className="account-popover">
               <div>
                 <strong>{user.displayName}</strong>
-                <small>{user.username ? `@${user.username}` : user.email}</small>
+                <small>{user.username ? `@${user.username}` : user.unified?'Fribench 账号':user.email}</small>
               </div>
               <a href="/_fribench/auth/manage?return_to=%2F" data-fribench-action="manage">资料、密码与安全 →</a>
               <button onClick={onLogout}>
@@ -423,7 +423,7 @@ function Sidebar({
   )
 }
 
-function OverviewPage({ onNavigate }: { onNavigate: (page: PageName) => void }) {
+function OverviewPage({ onNavigate,user }: { onNavigate: (page: PageName) => void;user:User }) {
   const [data, setData] = useState<Overview | null>(null)
   const [error, setError] = useState('')
   const load = useCallback(() => {
@@ -507,7 +507,7 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: PageName) => void }) 
           <Panel title="快捷操作">
             <QuickAction icon={<KeyRound />} title="生成客户端令牌" text="为新电脑创建独立凭据" onClick={() => onNavigate('tokens')} />
             <QuickAction icon={<Download />} title="下载 Windows 客户端" text="标准版 / 完整离线版，无需命令行配置" onClick={() => onNavigate('downloads')} />
-            <QuickAction icon={<Users />} title="邀请团队成员" text="每位成员的数据相互隔离" onClick={() => onNavigate('users')} />
+            {user.role==='admin'&&!user.unified&&<QuickAction icon={<Users />} title="邀请团队成员" text="每位成员的数据相互隔离" onClick={() => onNavigate('users')} />}
           </Panel>
         </div>
       </div>
@@ -515,7 +515,7 @@ function OverviewPage({ onNavigate }: { onNavigate: (page: PageName) => void }) 
   )
 }
 
-function DevicesPage() {
+function DevicesPage({onNavigate}:{onNavigate:(page:PageName)=>void}) {
   const [items, setItems] = useState<Device[]>([])
   const [loading, setLoading] = useState(true)
   useEffect(() => {
@@ -544,7 +544,7 @@ function DevicesPage() {
               </div>
             ))}
           </div>
-        ) : <EmptyState icon={<Monitor />} text="尚未注册设备，请先下载客户端并执行 init。" />}
+        ) : <><EmptyState icon={<Monitor />} text="还没有连接的电脑。下载客户端后，在设置中选择‘连接 Fribench 账号’。"/><button className="primary-button" onClick={()=>onNavigate('downloads')}>下载 Windows 客户端</button></>}
       </Panel>
     </>
   )
@@ -570,15 +570,15 @@ function UsersPage({ currentUser }: { currentUser: User }) {
   const [items, setItems] = useState<User[]>([])
   const [dialogOpen, setDialogOpen] = useState(false)
   const [error, setError] = useState('')
-  const load = useCallback(() => api.users().then((result) => setItems(result.users)).catch((err) => setError(err.message)), [])
+  const load = useCallback(() => {if(currentUser.role!=='admin')return Promise.resolve();return api.users().then((result) => setItems(result.users)).catch((err) => setError(err.message))}, [currentUser.role])
   useEffect(() => { load() }, [load])
   return (
     <>
       <PageHeader
         eyebrow="管理"
         title="用户"
-        description="为同事创建独立账号；设备、令牌和会话快照数据按用户隔离"
-        action={<button className="primary-button" onClick={() => setDialogOpen(true)}><Plus size={17} /> 新建用户</button>}
+        description={currentUser.unified?'成员使用 Fribench 统一账号登录；设备、令牌与会话快照按用户隔离':'为同事创建独立账号；设备、令牌和会话快照数据按用户隔离'}
+        action={currentUser.role==='admin'&&!currentUser.unified?<button className="primary-button" onClick={() => setDialogOpen(true)}><Plus size={17} /> 新建用户</button>:undefined}
       />
       {error && <ErrorBanner message={error} retry={load} />}
       <Panel title={`团队成员 (${items.length})`}>
