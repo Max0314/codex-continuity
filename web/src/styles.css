@@ -870,6 +870,13 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .boundary-copy p { margin: 0; color: var(--text-soft); font-size: 11px; line-height: 1.8; }
 
 .modal-backdrop {
+  margin: 0;
+  border: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  color: inherit;
   z-index: 100;
   position: fixed;
   inset: 0;
@@ -890,6 +897,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   box-shadow: 0 30px 80px rgba(15,23,42,.22);
   animation: modalIn .2s ease;
 }
+dialog.modal-backdrop:not([open]) { display: none; }
 .modal-header { height: 62px; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; border-bottom: 1px solid var(--border); }
 .modal-header h2 { margin: 0; font-size: 15px; }
 .modal-body { padding: 22px; }

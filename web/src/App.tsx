@@ -1,4 +1,4 @@
-import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
+import { FormEvent, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   Check,
@@ -94,6 +94,18 @@ export default function App() {
     document.documentElement.dataset.theme = theme
     localStorage.setItem('continuity-theme', theme)
   }, [theme])
+
+  useEffect(() => {
+    if (!sidebarOpen) return
+    const dismiss = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSidebarOpen(false)
+        document.querySelector<HTMLButtonElement>('.mobile-menu-button')?.focus()
+      }
+    }
+    document.addEventListener('keydown', dismiss)
+    return () => document.removeEventListener('keydown', dismiss)
+  }, [sidebarOpen])
 
   useEffect(() => {
     api
@@ -316,6 +328,20 @@ function Header({
   onLogout: () => void
 }) {
   const [accountOpen, setAccountOpen] = useState(false)
+  const accountMenu = useRef<HTMLDivElement>(null)
+  const accountTrigger = useRef<HTMLButtonElement>(null)
+  useEffect(() => {
+    if (!accountOpen) return
+    const outside = (event: PointerEvent) => {
+      if (!accountMenu.current?.contains(event.target as Node)) setAccountOpen(false)
+    }
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { setAccountOpen(false); accountTrigger.current?.focus() }
+    }
+    document.addEventListener('pointerdown', outside)
+    document.addEventListener('keydown', escape)
+    return () => { document.removeEventListener('pointerdown', outside); document.removeEventListener('keydown', escape) }
+  }, [accountOpen])
   return (
     <header className="top-header">
       <div className="header-brand">
@@ -341,8 +367,8 @@ function Header({
             </button>
           ))}
         </div>
-        <div className="account-menu">
-          <button className="account-trigger" onClick={() => setAccountOpen((value) => !value)}>
+        <div className="account-menu" ref={accountMenu}>
+          <button ref={accountTrigger} className="account-trigger" aria-label={`账号：${user.displayName}`} aria-expanded={accountOpen} onClick={() => setAccountOpen((value) => !value)}>
             <span className="avatar">{user.avatarUrl?<img src={user.avatarUrl} alt="" width="36" height="36"/>:user.displayName.slice(0, 1)}</span>
             <span className="account-copy">
               <strong>{user.displayName}</strong>
@@ -356,7 +382,7 @@ function Header({
                 <strong>{user.displayName}</strong>
                 <small>{user.username ? `@${user.username}` : user.unified?'Fribench 账号':user.email}</small>
               </div>
-              <a href="/_fribench/auth/manage?return_to=%2F" data-fribench-action="manage">资料、密码与安全 →</a>
+              <a href="/_fribench/auth/manage?return_to=%2F" data-fribench-action="manage">资料与安全 →</a>
               <button onClick={onLogout}>
                 <LogOut size={16} /> 退出登录
               </button>
@@ -977,13 +1003,21 @@ function StatusBadge({ online }: { online: boolean }) {
 }
 
 function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: ReactNode }) {
+  const dialogRef = useRef<HTMLDialogElement>(null)
+  useEffect(() => {
+    const dialog = dialogRef.current
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    if (!dialog) return
+    dialog.showModal()
+    return () => { dialog.close(); if (previous?.isConnected) previous.focus() }
+  }, [])
   return (
-    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
-      <div className="modal" role="dialog" aria-modal="true" aria-label={title}>
-        <div className="modal-header"><h2>{title}</h2><button className="icon-button" onClick={onClose}><X size={20} /></button></div>
+    <dialog ref={dialogRef} className="modal-backdrop" aria-label={title} onCancel={(event) => { event.preventDefault(); onClose() }} onMouseDown={(event) => { if (event.target === event.currentTarget) onClose() }}>
+      <div className="modal">
+        <div className="modal-header"><h2>{title}</h2><button type="button" className="icon-button" aria-label="关闭弹窗" onClick={onClose}><X size={20} /></button></div>
         <div className="modal-body">{children}</div>
       </div>
-    </div>
+    </dialog>
   )
 }
 
