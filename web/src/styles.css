@@ -1116,3 +1116,17 @@ dialog.modal-backdrop:not([open]) { display: none; }
   .edition-download { width: 100%; }
 }
 .avatar img {border-radius:inherit;object-fit:cover;max-width:100%;}
+
+/* Fribench: native scroll boundaries; keep nested gesture owners independent. */
+:root .sidebar nav,
+:root .modal {
+  min-width: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior-x: none;
+  overscroll-behavior-y: contain;
+}
+:root .data-table-wrap,
+:root .code-copy code {
+  overscroll-behavior-x: none;
+}
