@@ -323,16 +323,9 @@ func (s *Store) createOwnedHandoff(p CreateHandoffParams, stage, digest string) 
 			return model.Handoff{}, false, errStorageConflict
 		}
 	}
-	var used, total int64
 	var count int
-	if err = tx.QueryRow("SELECT COALESCE(SUM(blob_size),0),COUNT(*) FROM handoffs WHERE user_id=?", p.UserID).Scan(&used, &count); err != nil {
-		return model.Handoff{}, false, err
-	}
-	if err = tx.QueryRow("SELECT COALESCE(SUM(blob_size),0) FROM handoffs").Scan(&total); err != nil {
-		return model.Handoff{}, false, err
-	}
-	if count >= 1000 || used+p.BlobSize > 2<<30 || total+p.BlobSize > 8<<30 {
-		return model.Handoff{}, false, errStorageConflict
+	if s.retention.maxUserBytes > 0 && p.BlobSize > s.retention.maxUserBytes {
+		return model.Handoff{}, false, ErrStorageQuota
 	}
 	h := model.Handoff{ID: newID(), ProjectName: strings.TrimSpace(p.ProjectName), WorkspaceKey: p.WorkspaceKey, SourceDeviceID: p.SourceDeviceID, TargetDeviceName: p.TargetDeviceName, Status: model.HandoffPending, BlobSize: p.BlobSize, CreatedAt: time.Now().UTC()}
 	if h.WorkspaceKey == "" || len(h.WorkspaceKey) > 200 || len(h.ProjectName) > 300 || !json.Valid(p.Manifest) {
@@ -341,6 +334,27 @@ func (s *Store) createOwnedHandoff(p CreateHandoffParams, stage, digest string) 
 	_, err = tx.Exec("INSERT INTO handoffs(id,user_id,project_name,workspace_key,source_device_id,target_device_name,status,manifest_json,blob_path,blob_size,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)", h.ID, p.UserID, h.ProjectName, h.WorkspaceKey, h.SourceDeviceID, h.TargetDeviceName, h.Status, string(p.Manifest), p.BlobPath, p.BlobSize, h.CreatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return model.Handoff{}, false, err
+	}
+	deleted, err := s.pruneHandoffRows(tx, p.UserID, h.ID, h.CreatedAt)
+	if err != nil {
+		return model.Handoff{}, false, err
+	}
+	var used, total int64
+	if err = tx.QueryRow("SELECT COALESCE(SUM(blob_size),0),COUNT(*) FROM handoffs WHERE user_id=?", p.UserID).Scan(&used, &count); err != nil {
+		return model.Handoff{}, false, err
+	}
+	if err = tx.QueryRow("SELECT COALESCE(SUM(blob_size),0) FROM handoffs").Scan(&total); err != nil {
+		return model.Handoff{}, false, err
+	}
+	userLimit, totalLimit := s.retention.maxUserBytes, s.retention.maxTotalBytes
+	if userLimit <= 0 {
+		userLimit = 2 << 30
+	}
+	if totalLimit <= 0 {
+		totalLimit = 8 << 30
+	}
+	if count > 1000 || used > userLimit || total > totalLimit {
+		return model.Handoff{}, false, ErrStorageQuota
 	}
 	if stage != "" {
 		_, err = tx.Exec("UPDATE continuity_guest_claims SET handoff_id=? WHERE user_id=? AND stage_id=?", h.ID, p.UserID, stage)
@@ -352,6 +366,11 @@ func (s *Store) createOwnedHandoff(p CreateHandoffParams, stage, digest string) 
 			return model.Handoff{}, false, err
 		}
 	}
-	err = tx.Commit()
-	return h, false, err
+	if err = tx.Commit(); err != nil {
+		return model.Handoff{}, false, err
+	}
+	for _, item := range deleted {
+		_ = s.removeBlob(item.BlobPath)
+	}
+	return h, false, nil
 }

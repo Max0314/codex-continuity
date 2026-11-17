@@ -29,7 +29,21 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	go store.CleanupExpiredSessions(ctx)
+	go store.RunMaintenance(ctx, func(result server.MaintenanceResult, err error) {
+		if err != nil {
+			logger.Error("server maintenance failed", "error", err)
+			return
+		}
+		if result.ExpiredSessions > 0 || result.DeletedHandoffs > 0 || result.DeletedBlobs > 0 {
+			logger.Info(
+				"server maintenance completed",
+				"expiredSessions", result.ExpiredSessions,
+				"deletedHandoffs", result.DeletedHandoffs,
+				"deletedBlobs", result.DeletedBlobs,
+				"reclaimedBytes", result.ReclaimedBytes,
+			)
+		}
+	})
 
 	httpServer := &http.Server{
 		Addr:              cfg.Address,

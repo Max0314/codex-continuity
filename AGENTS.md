@@ -1,3 +1,6 @@
+# AGENTS.md
+
+本项目为独立 Fribench 子项目。修改前读取 README 和当前目录的适用约束；构建、测试按本仓库实际脚本执行。
 
 
 <!-- fribench-shared-policy:start -->

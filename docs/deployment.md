@@ -29,6 +29,10 @@ CONTINUITY_ADMIN_NAME=系统管理员
 CONTINUITY_ADMIN_PASSWORD=一段足够长的随机密码
 CONTINUITY_COOKIE_SECURE=true
 CONTINUITY_MAX_UPLOAD_MIB=500
+CONTINUITY_HANDOFF_RETENTION_DAYS=14
+CONTINUITY_HANDOFF_VERSIONS=2
+CONTINUITY_USER_STORAGE_MIB=2048
+CONTINUITY_TOTAL_STORAGE_MIB=10240
 ```
 
 启动：
@@ -140,6 +144,11 @@ SHA256SUMS.txt
 
 ## 6. 备份
 
+服务端默认对同一账号、工作区和来源设备保留最新 2 个快照，快照最长保留 14 天；
+单账号密文上限为 2 GiB，服务端总密文上限为 10 GiB。达到账号上限时优先删除该账号
+最旧快照，达到服务端总上限时拒绝新上传。可通过上述环境变量按磁盘容量调整，但账号
+上限不能小于单次上传上限，总上限不能小于账号上限。
+
 Docker 命名卷 `continuity-data` 包含：
 
 ```text
@@ -149,4 +158,4 @@ continuity.db-shm
 blobs/*.ccx
 ```
 
-备份时应同时备份 SQLite 和 `blobs/`。最稳妥做法是短暂停止容器，备份整个卷，再启动容器。
+独立 SQLite 模式备份时应同时备份 SQLite 和 `blobs/`。最稳妥做法是短暂停止容器，备份整个卷，再启动容器。Fribench 正式环境使用 `DATABASE_URL` 指向 PostgreSQL，应在暂停写入后配套备份该应用数据库和密文目录；不能只备份卷内的历史 SQLite 文件。

@@ -533,7 +533,7 @@ func (s *HTTPServer) uploadHandoff(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusBadRequest, "只能上传一个加密 blob")
 				return
 			}
-			blobName := newID() + ".ccx"
+			blobName := newID() + ".ccx.partial"
 			relativePath = filepath.Join("blobs", blobName)
 			absolutePath = filepath.Join(s.cfg.DataDir, relativePath)
 			size, err = saveUpload(part, absolutePath, s.cfg.MaxUploadBytes)
@@ -579,6 +579,15 @@ func (s *HTTPServer) uploadHandoff(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "加密 blob 为空")
 		return
 	}
+	finalRelativePath := strings.TrimSuffix(relativePath, ".partial")
+	finalAbsolutePath := strings.TrimSuffix(absolutePath, ".partial")
+	if err := os.Rename(absolutePath, finalAbsolutePath); err != nil {
+		cleanupBlob()
+		s.internalError(w, err)
+		return
+	}
+	relativePath = finalRelativePath
+	absolutePath = finalAbsolutePath
 	file, err := os.Open(absolutePath)
 	if err != nil {
 		cleanupBlob()
@@ -611,6 +620,10 @@ func (s *HTTPServer) uploadHandoff(w http.ResponseWriter, r *http.Request) {
 	}, stage, hex.EncodeToString(digest.Sum(nil)))
 	if err != nil {
 		_ = os.Remove(absolutePath)
+		if errors.Is(err, ErrStorageQuota) {
+			writeError(w, http.StatusInsufficientStorage, "云端存储已达到安全配额，请稍后重试或清理旧记录")
+			return
+		}
 		writeError(w, http.StatusConflict, "快照保存失败或空间不足；本地原始文件保留，请重试")
 		return
 	}

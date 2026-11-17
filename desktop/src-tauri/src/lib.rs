@@ -35,6 +35,7 @@ const AUTO_SYNC_INTERVAL_SECONDS: i64 = 300;
 const MAX_LOCAL_CONVERSATIONS: usize = 1000;
 const MAX_BUNDLE_MIB: u16 = 500;
 const DEFAULT_SERVER_URL: &str = "https://continuity.fribench.cn";
+const LEGACY_SERVER_URL: &str = "http://1.14.72.50:24001";
 const AUTH_SESSION_SECRET: &str = "auth-session";
 
 #[derive(Clone, Default)]
@@ -452,7 +453,24 @@ fn load_settings_file(app: &AppHandle) -> Result<SettingsFile, String> {
     if ![0, 2, 5, 7].contains(&settings.sync_days) {
         settings.sync_days = 7;
     }
+    if migrate_legacy_server_url(&mut settings) {
+        write_settings_file(app, &settings)?;
+    }
     Ok(settings)
+}
+
+fn migrate_legacy_server_url(settings: &mut SettingsFile) -> bool {
+    if settings
+        .server_url
+        .trim()
+        .trim_end_matches('/')
+        .eq_ignore_ascii_case(LEGACY_SERVER_URL)
+    {
+        settings.server_url = DEFAULT_SERVER_URL.to_string();
+        true
+    } else {
+        false
+    }
 }
 
 fn write_settings_file(app: &AppHandle, settings: &SettingsFile) -> Result<(), String> {
@@ -2630,6 +2648,23 @@ mod tests {
             "https://continuity.example.com"
         );
         assert!(normalized_url("continuity.example.com").is_err());
+    }
+
+    #[test]
+    fn migrates_only_the_retired_temporary_server_url() {
+        let mut legacy = SettingsFile {
+            server_url: format!("{LEGACY_SERVER_URL}/"),
+            ..SettingsFile::default()
+        };
+        assert!(migrate_legacy_server_url(&mut legacy));
+        assert_eq!(legacy.server_url, DEFAULT_SERVER_URL);
+
+        let mut custom = SettingsFile {
+            server_url: "https://continuity.example.com".to_string(),
+            ..SettingsFile::default()
+        };
+        assert!(!migrate_legacy_server_url(&mut custom));
+        assert_eq!(custom.server_url, "https://continuity.example.com");
     }
 
     #[test]

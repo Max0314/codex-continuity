@@ -1,14 +1,14 @@
-# fribench 临时部署
+# fribench 部署
 
 此部署专用于 `fribench`：
 
 - 容器后端：`127.0.0.1:24001`
-- 临时公网入口：`http://1.14.72.50:24001`
-- UFW 接口：`eth0`
-- 公网持续时间：48 小时
-- 到期动作：删除 UFW 规则并移除临时 Nginx 站点
+- 正式公网入口：`https://continuity.fribench.cn`
+- TLS 与反向代理：fribench 域名 Nginx 站点
+- Cookie：仅通过 HTTPS 传输
 
-容器继续在回环地址运行，临时入口关闭后可通过再次执行 `open` 重新开放。
+容器只在回环地址运行，不直接暴露公网端口。仓库中的临时入口控制命令仅保留作
+应急诊断用途，不是正式客户端入口。
 
 发布目录使用
 `/srv/fribench/tools/codex-continuity/releases/<YYYYMMDD-HHMMSS>`，
@@ -22,7 +22,8 @@
 sudo bash /tmp/codex-continuity-root/install-root.sh
 ```
 
-之后 `cpl` 用户只能免密运行固定的 Compose 文件和三个入口控制命令：
+之后 `cpl` 用户只能免密运行固定的 Compose 文件。临时入口控制命令只用于
+管理员明确授权的应急诊断：
 
 ```bash
 sudo docker compose \
@@ -36,4 +37,4 @@ sudo /usr/local/sbin/fribench-codex-continuity close
 首次登录账号为 `admin@fribench.local`。管理员密码只保存在服务器权限为 `0600`
 的 `.env` 中，可在服务器终端按需读取，不写入仓库或部署日志。
 
-这是临时 HTTP 入口，不用于长期或正式商用环境。
+桌面客户端和网页统一使用正式 HTTPS 域名，不再使用公网 IP 与 `24001` 端口。

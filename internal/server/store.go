@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,11 +21,27 @@ var (
 	ErrNotFound       = errors.New("not found")
 	ErrDeviceConflict = errors.New("device conflict")
 	ErrDeviceNotOwned = errors.New("device not owned")
+	ErrStorageQuota   = errors.New("storage quota exceeded")
 )
 
 type Store struct {
-	db      *database
-	dataDir string
+	db        *database
+	dataDir   string
+	retention handoffRetentionPolicy
+}
+
+type handoffRetentionPolicy struct {
+	maxAge        time.Duration
+	maxVersions   int
+	maxUserBytes  int64
+	maxTotalBytes int64
+}
+
+type MaintenanceResult struct {
+	ExpiredSessions int
+	DeletedHandoffs int
+	DeletedBlobs    int
+	ReclaimedBytes  int64
 }
 
 type authenticatedUser struct {
@@ -81,7 +98,16 @@ func OpenStore(cfg Config) (*Store, error) {
 	if db.postgres {
 		db.SetMaxOpenConns(8)
 	}
-	store := &Store{db: db, dataDir: cfg.DataDir}
+	store := &Store{
+		db:      db,
+		dataDir: cfg.DataDir,
+		retention: handoffRetentionPolicy{
+			maxAge:        cfg.HandoffRetention,
+			maxVersions:   cfg.HandoffVersions,
+			maxUserBytes:  cfg.UserStorageBytes,
+			maxTotalBytes: cfg.TotalStorageBytes,
+		},
+	}
 	if err := store.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -982,15 +1008,193 @@ func (s *Store) CreateHandoff(p CreateHandoffParams) (model.Handoff, error) {
 	if len(p.Manifest) == 0 {
 		p.Manifest = json.RawMessage(`{}`)
 	}
-	_, err := s.db.Exec(`
+	if s.retention.maxUserBytes > 0 && h.BlobSize > s.retention.maxUserBytes {
+		return model.Handoff{}, ErrStorageQuota
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return model.Handoff{}, err
+	}
+	defer tx.Rollback()
+	if err := lockUploads(tx); err != nil {
+		return model.Handoff{}, err
+	}
+	if _, err = tx.Exec(`
 INSERT INTO handoffs(
  id,user_id,project_name,workspace_key,source_device_id,target_device_name,
  status,manifest_json,blob_path,blob_size,created_at
 ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 		h.ID, p.UserID, h.ProjectName, h.WorkspaceKey, h.SourceDeviceID, h.TargetDeviceName,
 		h.Status, string(p.Manifest), p.BlobPath, h.BlobSize, h.CreatedAt.Format(time.RFC3339Nano),
-	)
-	return h, err
+	); err != nil {
+		return model.Handoff{}, err
+	}
+	deleted, err := s.pruneHandoffRows(tx, p.UserID, h.ID, h.CreatedAt)
+	if err != nil {
+		return model.Handoff{}, err
+	}
+	if s.retention.maxTotalBytes > 0 {
+		var total int64
+		if err := tx.QueryRow("SELECT COALESCE(SUM(blob_size),0) FROM handoffs").Scan(&total); err != nil {
+			return model.Handoff{}, err
+		}
+		if total > s.retention.maxTotalBytes {
+			return model.Handoff{}, ErrStorageQuota
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Handoff{}, err
+	}
+	for _, item := range deleted {
+		_ = s.removeBlob(item.BlobPath)
+	}
+	return h, nil
+}
+
+type handoffStorageRow struct {
+	ID             string
+	UserID         string
+	WorkspaceKey   string
+	SourceDeviceID string
+	BlobPath       string
+	BlobSize       int64
+	CreatedAt      time.Time
+}
+
+func (s *Store) pruneHandoffRows(
+	tx *transaction,
+	userID string,
+	protectedID string,
+	now time.Time,
+) ([]handoffStorageRow, error) {
+	query := `
+SELECT id,user_id,workspace_key,source_device_id,blob_path,blob_size,created_at
+FROM handoffs`
+	args := []any{}
+	if userID != "" {
+		query += " WHERE user_id=?"
+		args = append(args, userID)
+	}
+	query += " ORDER BY user_id,workspace_key,source_device_id,created_at DESC,id DESC"
+	rows, err := tx.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	records := []handoffStorageRow{}
+	for rows.Next() {
+		var item handoffStorageRow
+		var created string
+		if err := rows.Scan(
+			&item.ID,
+			&item.UserID,
+			&item.WorkspaceKey,
+			&item.SourceDeviceID,
+			&item.BlobPath,
+			&item.BlobSize,
+			&created,
+		); err != nil {
+			return nil, err
+		}
+		item.CreatedAt = parseTime(created)
+		records = append(records, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+
+	type partitionKey struct {
+		userID, workspaceKey, sourceDeviceID string
+	}
+	versions := map[partitionKey]int{}
+	marked := map[string]bool{}
+	cutoff := now.Add(-s.retention.maxAge)
+	for _, item := range records {
+		key := partitionKey{item.UserID, item.WorkspaceKey, item.SourceDeviceID}
+		versions[key]++
+		tooOld := s.retention.maxAge > 0 && item.CreatedAt.Before(cutoff)
+		tooMany := s.retention.maxVersions > 0 && versions[key] > s.retention.maxVersions
+		if item.ID != protectedID && (tooOld || tooMany) {
+			marked[item.ID] = true
+		}
+	}
+
+	userBytes := map[string]int64{}
+	for _, item := range records {
+		if !marked[item.ID] {
+			userBytes[item.UserID] += item.BlobSize
+		}
+	}
+	if s.retention.maxUserBytes > 0 {
+		oldest := append([]handoffStorageRow(nil), records...)
+		sort.Slice(oldest, func(i, j int) bool {
+			if oldest[i].CreatedAt.Equal(oldest[j].CreatedAt) {
+				return oldest[i].ID < oldest[j].ID
+			}
+			return oldest[i].CreatedAt.Before(oldest[j].CreatedAt)
+		})
+		for _, item := range oldest {
+			if userBytes[item.UserID] <= s.retention.maxUserBytes {
+				continue
+			}
+			if marked[item.ID] || item.ID == protectedID {
+				continue
+			}
+			marked[item.ID] = true
+			userBytes[item.UserID] -= item.BlobSize
+		}
+		for _, total := range userBytes {
+			if total > s.retention.maxUserBytes {
+				return nil, ErrStorageQuota
+			}
+		}
+	}
+
+	deleted := make([]handoffStorageRow, 0, len(marked))
+	for _, item := range records {
+		if !marked[item.ID] {
+			continue
+		}
+		if _, err := tx.Exec("DELETE FROM handoffs WHERE id=?", item.ID); err != nil {
+			return nil, err
+		}
+		deleted = append(deleted, item)
+	}
+	return deleted, nil
+}
+
+func (s *Store) removeBlob(relativePath string) error {
+	absolutePath, err := s.safeBlobPath(relativePath)
+	if err != nil {
+		return err
+	}
+	err = os.Remove(absolutePath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
+}
+
+func (s *Store) safeBlobPath(relativePath string) (string, error) {
+	clean := filepath.Clean(strings.TrimSpace(relativePath))
+	if clean == "." || filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("invalid blob path")
+	}
+	blobsRoot, err := filepath.Abs(filepath.Join(s.dataDir, "blobs"))
+	if err != nil {
+		return "", err
+	}
+	absolutePath, err := filepath.Abs(filepath.Join(s.dataDir, clean))
+	if err != nil {
+		return "", err
+	}
+	if absolutePath != blobsRoot && !strings.HasPrefix(absolutePath, blobsRoot+string(filepath.Separator)) {
+		return "", fmt.Errorf("blob path escapes data directory")
+	}
+	return absolutePath, nil
 }
 
 func (s *Store) ListHandoffs(userID string, limit int) ([]model.Handoff, error) {
@@ -1155,7 +1359,17 @@ func newID() string {
 	return plain
 }
 
-func (s *Store) CleanupExpiredSessions(ctx context.Context) {
+func (s *Store) RunMaintenance(
+	ctx context.Context,
+	report func(MaintenanceResult, error),
+) {
+	run := func() {
+		result, err := s.Maintenance(time.Now().UTC())
+		if report != nil {
+			report(result, err)
+		}
+	}
+	run()
 	ticker := time.NewTicker(30 * time.Minute)
 	defer ticker.Stop()
 	for {
@@ -1163,7 +1377,124 @@ func (s *Store) CleanupExpiredSessions(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			_, _ = s.db.Exec("DELETE FROM sessions WHERE expires_at<?", nowText())
+			run()
 		}
 	}
+}
+
+func (s *Store) Maintenance(now time.Time) (MaintenanceResult, error) {
+	var result MaintenanceResult
+	tx, err := s.db.Begin()
+	if err != nil {
+		return result, err
+	}
+	defer tx.Rollback()
+	if err := lockUploads(tx); err != nil {
+		return result, err
+	}
+	for _, query := range []string{
+		"DELETE FROM sessions WHERE expires_at<?",
+		"DELETE FROM client_sessions WHERE refresh_expires_at<?",
+	} {
+		deleted, err := tx.Exec(query, now.Format(time.RFC3339Nano))
+		if err != nil {
+			return result, err
+		}
+		count, _ := deleted.RowsAffected()
+		result.ExpiredSessions += int(count)
+	}
+	pruned, err := s.pruneHandoffRows(tx, "", "", now)
+	if err != nil {
+		return result, err
+	}
+	if err := tx.Commit(); err != nil {
+		return result, err
+	}
+	for _, item := range pruned {
+		result.DeletedHandoffs++
+		if err := s.removeBlob(item.BlobPath); err == nil {
+			result.DeletedBlobs++
+			result.ReclaimedBytes += item.BlobSize
+		}
+	}
+	if err := s.cleanupOrphanBlobs(now, &result); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func (s *Store) cleanupOrphanBlobs(now time.Time, result *MaintenanceResult) error {
+	type reference struct {
+		id, path string
+		size     int64
+	}
+	rows, err := s.db.Query("SELECT id,blob_path,blob_size FROM handoffs")
+	if err != nil {
+		return err
+	}
+	references := []reference{}
+	for rows.Next() {
+		var item reference
+		if err := rows.Scan(&item.id, &item.path, &item.size); err != nil {
+			rows.Close()
+			return err
+		}
+		references = append(references, item)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	referenced := map[string]bool{}
+	for _, item := range references {
+		absolutePath, pathErr := s.safeBlobPath(item.path)
+		if pathErr == nil {
+			if _, statErr := os.Stat(absolutePath); statErr == nil {
+				referenced[absolutePath] = true
+				continue
+			} else if !os.IsNotExist(statErr) {
+				return statErr
+			}
+		}
+		if _, err := s.db.Exec("DELETE FROM handoffs WHERE id=?", item.id); err != nil {
+			return err
+		}
+		result.DeletedHandoffs++
+	}
+
+	blobsRoot := filepath.Join(s.dataDir, "blobs")
+	entries, err := os.ReadDir(blobsRoot)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	cutoff := now.Add(-time.Hour)
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		absolutePath := filepath.Join(blobsRoot, entry.Name())
+		if referenced[absolutePath] {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.ModTime().After(cutoff) {
+			continue
+		}
+		if err := os.Remove(absolutePath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		result.DeletedBlobs++
+		result.ReclaimedBytes += info.Size()
+	}
+	return nil
 }
